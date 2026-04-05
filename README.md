@@ -7,7 +7,7 @@
 
 The Python package is **`backtester`** (`pip install -e .`, see `pyproject.toml`).
 
-[Workflow](#workflow-like-claude-code-for-trading-strategies) · [Run with Docker](#run-with-docker) · [Run manually](#run-manually-backend--frontend) · [Web app](#web-app) · [CLI](#cli-quick-start) · [Corporate examples](#corporate-strategy-examples) · [How it works](#how-it-works) · [LLM keys](#llm-providers)
+[Workflow](#workflow-like-claude-code-for-trading-strategies) · [Docker (preferred)](#run-with-docker-preferred) · [Run manually](#run-manually-backend--frontend) · [Web app](#web-app) · [CLI](#cli-quick-start) · [Corporate examples](#corporate-strategy-examples) · [How it works](#how-it-works) · [LLM keys](#llm-providers)
 
 <p align="center">
   <img src="recordings/chart-msft-demo.png" alt="Sample price chart with backtest signals" width="720" />
@@ -25,11 +25,30 @@ You are not guessing in the dark. Open the **chart** with **buy/sell markers** a
 
 ---
 
-## Run with Docker
+## Run with Docker (preferred)
 
-**Requires:** [Docker](https://docs.docker.com/get-docker/) with Compose.
+**Docker is the simpler way to run the full app** (web UI + API): one install, one command, no Python virtualenv or Node.js setup on your machine. Prefer this unless you are actively developing the repo and want separate hot reload for Python and Next.js ([run manually](#run-manually-backend--frontend) below).
 
-From the **repository root**:
+### New to Docker? Install Docker Desktop first
+
+You only do this once per computer.
+
+1. **Download** [Docker Desktop](https://www.docker.com/products/docker-desktop/) for **Windows** or **macOS** (pick the right chip on Mac: Apple Silicon vs Intel— the download page explains which).
+2. **Run the installer** and keep the default options. On **Windows**, if the installer asks to use **WSL 2**, say yes; that is normal and helps Docker run smoothly.
+3. **Start Docker Desktop** from the Start menu (Windows) or Applications (Mac). Wait until it shows **Docker is running** (a whale icon may appear near the clock).
+4. **Check that it works:** open a terminal (Command Prompt or PowerShell on Windows; Terminal on Mac) and run:
+   ```bash
+   docker --version
+   ```
+   You should see a version number. If you get “command not found,” restart the PC or Mac, open Docker Desktop again, and retry.
+
+**Linux:** Install [Docker Engine](https://docs.docker.com/engine/install/) and [Compose plugin](https://docs.docker.com/compose/install/linux/) for your distribution, or use [Docker Desktop for Linux](https://docs.docker.com/desktop/install/linux/) where available.
+
+---
+
+**Requires:** Docker with Compose (included with Docker Desktop).
+
+From the **repository root** (after you have [cloned](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) this project):
 
 ```bash
 docker compose -f docker/docker-compose.yml up --build
@@ -56,7 +75,7 @@ More detail, persistence, and troubleshooting: **[docker/README.md](docker/READM
 
 ## Run manually (backend + frontend)
 
-Use this when you want hot reload and a local Node/Python workflow.
+Use this when you want **hot reload** and a local **Python + Node** workflow. It is more steps than [Docker](#run-with-docker-preferred); choose it for day-to-day development on the codebase.
 
 ### 1. Backend (FastAPI)
 
