@@ -4,13 +4,13 @@
 
 <p align="center" id="demo">
   <video
-    src="https://raw.githubusercontent.com/tanmay2893/trading_copilot/master/recordings/strategy-demo_v1.mp4"
+    src="https://raw.githubusercontent.com/tanmay2893/trading_copilot/refs/heads/master/recordings/strategy-demo_v1.mp4"
     controls
     width="920"
     playsinline
     preload="metadata"
   >
-    <a href="https://raw.githubusercontent.com/tanmay2893/trading_copilot/master/recordings/strategy-demo_v1.mp4">Open the strategy demo (MP4)</a>
+    <a href="https://raw.githubusercontent.com/tanmay2893/trading_copilot/refs/heads/master/recordings/strategy-demo_v1.mp4">Open the strategy demo (MP4)</a>
   </video>
   <br /><br />
   <sub><em>See the full loop: describe a strategy, run a backtest, read the summary, and inspect buy/sell markers on the chart.</em></sub>
