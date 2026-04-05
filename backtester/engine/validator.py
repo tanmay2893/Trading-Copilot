@@ -19,9 +19,18 @@ class ValidationResult:
 def validate_output(
     signals_df: pd.DataFrame,
     data_df: pd.DataFrame,
+    strategy_description: str | None = None,
+    corporate_needs: set | None = None,
+    strategy_code: str | None = None,
 ) -> ValidationResult:
     """Run the pre-built test suite and return a structured result."""
-    test_results = run_tests(signals_df, data_df)
+    test_results = run_tests(
+        signals_df,
+        data_df,
+        strategy_description=strategy_description,
+        corporate_needs=corporate_needs,
+        strategy_code=strategy_code,
+    )
     issues = [t.message for t in test_results if not t.passed]
     return ValidationResult(
         valid=len(issues) == 0,

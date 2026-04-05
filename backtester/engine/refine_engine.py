@@ -18,6 +18,7 @@ from backtester.engine.invariants import (
     compare_signals,
     format_signal_diff_for_prompt,
 )
+from backtester.data.corporate import detect_corporate_needs
 from backtester.engine.validator import validate_output
 from backtester.llm.base import BaseLLMProvider
 from backtester.prompts.templates import (
@@ -68,6 +69,8 @@ def run_refine_turn(
     conversation_context = session.to_prompt_context()
     last_error: dict = {}
     corp_flag = has_corporate_columns(df)
+    snap = set(getattr(session, "corporate_needs_snapshot", None) or [])
+    corp_needs_for_validation = snap | detect_corporate_needs(session.strategy_description or "")
     images = [chart_image] if chart_image else None
 
     # Pre-compute baseline counts for prompt context if available.
@@ -151,7 +154,13 @@ def run_refine_turn(
             continue
 
         with step("Validating output") as s:
-            validation = validate_output(exec_result.output_df, df)
+            validation = validate_output(
+                exec_result.output_df,
+                df,
+                strategy_description=session.strategy_description,
+                corporate_needs=corp_needs_for_validation or None,
+                strategy_code=current_code,
+            )
             if validation.valid:
                 s.succeed(f"all {len(validation.test_results)} tests passed")
             else:

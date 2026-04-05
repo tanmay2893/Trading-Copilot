@@ -56,6 +56,14 @@ Corporate event columns available in self.df (present because the strategy invol
 Use these columns directly in setup() and generate_signals(). They are already merged into self.df by date.
 For example: self.df["Is_Earnings_Day"], self.df["Days_To_Earnings"], self.df["Dividend_Amount"], etc.
 Do NOT try to fetch corporate data yourself — it is pre-loaded.
+
+Boolean filters: use explicit tests — e.g. `self.df["Is_Earnings_Day"].eq(True)` or `self.df["Is_Earnings_Day"] == True` — not `if row.get("Is_Earnings_Day")` alone, which is error-prone with mixed types.
+
+Earnings timing and opens:
+- "Buy the day **after** earnings" means the entry bar is the **next trading row** after an earnings day. A reliable pattern is `self.df["Is_Earnings_Day"].shift(1)` (True on rows where **yesterday** was earnings) to flag the first bar after the report.
+- "Open X% above **previous** day's **close**" (overnight gap) on that entry bar is `(Open - Close.shift(1)) / Close.shift(1)` evaluated on the **same bar** as the entry. Do **not** use `Close.pct_change()` for that — that is close-to-close on one bar, not open vs prior close.
+- If entries are tied to each earnings **report**, the number of BUY signals cannot exceed the count of `Is_Earnings_Day` True rows in the data (typically ~4 per year for quarterly reports). Many more BUYs means the code is not filtering on earnings.
+- "Buy at **open** the **next trading day** after earnings, sell at **open** the **next** day after the buy": build a mask for the buy bar with `self.df["Is_Earnings_Day"].shift(1)` (True when yesterday was earnings). Append BUY with `price=Open` on that bar; append SELL with `price=Open` on the **following** row (next trading day). Do not require extra conditions that would zero out all rows unless the user asked for them.
 """
 
 CUSTOM_LOGIC_GUIDANCE = """\
@@ -146,6 +154,20 @@ def _corporate_section(has_corporate_data: bool) -> str:
     return f"\n## Corporate Event Data\n{CORPORATE_DATA_GUIDANCE}\n"
 
 
+def _earnings_codegen_mandatory_section(corporate_needs: set[str] | None) -> str:
+    """Extra rules when the user's request (keyword detection) includes earnings."""
+    if not corporate_needs or "earnings" not in corporate_needs:
+        return ""
+    return """\
+
+## Earnings calendar (mandatory)
+The user's request is classified as **earnings-related**; `self.df` includes corporate earnings columns (see Corporate Event Data).
+- You **must** use `Is_Earnings_Day` and/or `Days_To_Earnings` in `setup()` or `generate_signals()` so entries respect the earnings calendar (e.g. buy only on the trading day after an earnings report: use `self.df["Is_Earnings_Day"].shift(1)` on the entry bar, or an equivalent explicit tie to those columns).
+- Do **not** implement BUY using only generic open/close moves or `Close.pct_change()` without referencing those columns.
+- Do **not** invent columns such as `Market_Open`, `Market_Close`, or external index data unless the user explicitly asked for a benchmark.
+"""
+
+
 def build_codegen_prompt(
     strategy_description: str,
     data_columns: list[str],
@@ -154,9 +176,11 @@ def build_codegen_prompt(
     row_count: int,
     data_interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set[str] | None = None,
 ) -> str:
     timeframe_section = _build_timeframe_section(data_interval)
     corporate_section = _corporate_section(has_corporate_data)
+    earnings_mandatory = _earnings_codegen_mandatory_section(corporate_needs)
     return f"""\
 Write a Python class called `Strategy` that subclasses `BaseStrategy`.
 
@@ -180,7 +204,7 @@ First 3 rows:
 ## Indicators and custom logic
 {AVAILABLE_INDICATORS}
 {CUSTOM_LOGIC_GUIDANCE}
-{corporate_section}
+{corporate_section}{earnings_mandatory}
 ## Rules
 - **Completeness**: Implement every condition and concept from the user's description. Do not omit or merge distinct rules they state. If they name a custom indicator or define one with specific inputs (e.g. a different price series, smoothing, or formula), implement that in setup() using pandas/ta—do NOT use a pre-built add_* whose semantics differ (e.g. do not use add_rsi when the user asked for RSI on EMA or a custom-named variant). If they specify multiple entry filters, exit rules, or risk rules, implement all of them.
 - Implement the strategy exactly as described. Use pre-built or ta for standard indicators; use pandas/numpy for any other logic (derivatives, percentiles, custom conditions). Reason about the user's words and implement accordingly.
@@ -200,6 +224,7 @@ def build_fix_prompt(
     sample_rows: str = "",
     data_interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set[str] | None = None,
 ) -> str:
     history_text = ""
     if attempt_history:
@@ -213,6 +238,7 @@ def build_fix_prompt(
 
     timeframe_section = _build_timeframe_section(data_interval)
     corporate_section = _corporate_section(has_corporate_data)
+    earnings_mandatory = _earnings_codegen_mandatory_section(corporate_needs)
 
     return f"""\
 Fix the following strategy code. It failed with an error.
@@ -240,7 +266,7 @@ Traceback:
 
 ## Custom Logic
 {CUSTOM_LOGIC_GUIDANCE}
-{corporate_section}
+{corporate_section}{earnings_mandatory}
 ## Parameters
 {PARAMETERS_RULE}
 
@@ -263,9 +289,11 @@ def build_anti_loop_prompt(
     sample_rows: str,
     data_interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set[str] | None = None,
 ) -> str:
     timeframe_section = _build_timeframe_section(data_interval)
     corporate_section = _corporate_section(has_corporate_data)
+    earnings_mandatory = _earnings_codegen_mandatory_section(corporate_needs)
     return f"""\
 The previous approach has FAILED {repeat_count} times with the same error.
 You MUST take a COMPLETELY DIFFERENT approach to implementing this strategy.
@@ -295,7 +323,7 @@ You MUST take a COMPLETELY DIFFERENT approach to implementing this strategy.
 
 ## Custom Logic
 {CUSTOM_LOGIC_GUIDANCE}
-{corporate_section}
+{corporate_section}{earnings_mandatory}
 ## Parameters
 {PARAMETERS_RULE}
 
@@ -507,7 +535,11 @@ specific inputs), the code must implement that—not a standard substitute. If t
 specified multiple entry filters, exit rules, or risk rules, all must be implemented. \
 Flag as "fix" when any specified element is missing or replaced by a different rule. \
 Do NOT flag stylistic preferences or minor implementation choices. Approve only when \
-the code faithfully implements the full strategy as described."""
+the code faithfully implements the full strategy as described. \
+If the user required corporate/earnings conditions, the code must use the merged columns \
+(e.g. Is_Earnings_Day) and signal counts must be plausible (e.g. earnings-linked entries \
+cannot produce far more BUYs than there are earnings days in the sample unless the user \
+explicitly asked for multiple entries per report)."""
 
 
 def build_review_prompt(
@@ -602,10 +634,12 @@ def build_review_fix_prompt(
     sample_rows: str,
     data_interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set[str] | None = None,
 ) -> str:
     """Build a prompt to fix code based on review feedback."""
     timeframe_section = _build_timeframe_section(data_interval)
     corporate_section = _corporate_section(has_corporate_data)
+    earnings_mandatory = _earnings_codegen_mandatory_section(corporate_needs)
 
     issues_text = "\n".join(f"  {i+1}. {issue}" for i, issue in enumerate(review_issues))
 
@@ -641,7 +675,7 @@ Fix the code according to the review feedback.
 
 ## Custom Logic
 {CUSTOM_LOGIC_GUIDANCE}
-{corporate_section}
+{corporate_section}{earnings_mandatory}
 ## Parameters
 {PARAMETERS_RULE}
 
@@ -731,6 +765,7 @@ problem, propose a minimal relaxation.
 3. If root_cause is "strategy_too_restrictive" or "data_issue", propose a
    MINIMAL relaxation that preserves the original intent but will actually
    produce signals. Make the fewest changes possible.
+4. **Earnings / corporate events**: If the user's strategy explicitly requires earnings (or similar corporate timing), do NOT remove or dilute that requirement in revised_strategy (e.g. do not broaden entries to every day). Prefer root_cause "code_bug" when zero signals are likely due to wrong shift, wrong column, or open vs close confusion. If the user asked for "day after earnings", the fix is almost always code alignment with Is_Earnings_Day / shift(1), not dropping the earnings filter.
 
 Respond with this JSON structure ONLY (no other text):
 {{
@@ -838,6 +873,9 @@ event frequency, indicator warm-up, logical contradictions, or anything else.
 If the strategy looks fine, return verdict "ok".
 If you see issues, return verdict "revise" with a corrected strategy that
 preserves the original intent but fixes the problems. Make minimal changes.
+- If the user tied logic to **earnings** or other corporate events, your revised_strategy
+  must **keep** those requirements explicit (do not rewrite into a generic price-action rule
+  that drops earnings).
 
 Respond with this JSON structure ONLY (no other text):
 {{

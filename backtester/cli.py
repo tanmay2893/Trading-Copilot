@@ -138,6 +138,7 @@ def run(
             verbose=verbose,
             interval=resolved_interval,
             has_corporate_data=has_corporate_data,
+            corporate_needs=corporate_needs if corporate_needs else None,
         )
 
         console.print("  [dim]─" * 40 + "[/]")
@@ -823,7 +824,13 @@ def _run_on_other_stocks_loop(
 
         # --- Validate ---
         with step("Validating output") as s:
-            validation = validate_output(exec_result.output_df, data_df)
+            validation = validate_output(
+                exec_result.output_df,
+                data_df,
+                strategy_description=strategy_text,
+                corporate_needs=corporate_needs if corporate_needs else None,
+                strategy_code=strategy_code,
+            )
             if validation.valid:
                 s.succeed(f"all {len(validation.test_results)} tests passed")
             else:

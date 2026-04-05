@@ -90,6 +90,8 @@ class ChatSession:
 
     # Version selected in strategies panel for "add to chat" — refine/fix use this version's code when set
     chat_base_version_id: str | None = None
+    # From first keyword scan of the user's message (before preflight may rewrite strategy text).
+    corporate_needs_snapshot: list[str] | None = None
 
     def __post_init__(self):
         now = datetime.now(timezone.utc).isoformat()
@@ -272,6 +274,7 @@ class ChatSession:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "chat_base_version_id": self.chat_base_version_id,
+            "corporate_needs_snapshot": self.corporate_needs_snapshot,
             "messages": [asdict(m) for m in self.messages],
             "run_history": [asdict(r) for r in self.run_history],
         }
@@ -329,11 +332,13 @@ class ChatSession:
         raw.setdefault("end_date", None)
         raw.setdefault("title", None)
         raw.setdefault("chat_base_version_id", None)
+        raw.setdefault("corporate_needs_snapshot", None)
         raw.setdefault("llm_model_id", None)
         if raw.get("llm_model_id") == "":
             raw["llm_model_id"] = None
         allowed = {"session_id", "model", "llm_model_id", "title", "active_ticker", "active_strategy", "active_code",
-                   "active_interval", "created_at", "updated_at", "start_date", "end_date", "active_indicator_columns", "chat_base_version_id"}
+                   "active_interval", "created_at", "updated_at", "start_date", "end_date", "active_indicator_columns",
+                   "chat_base_version_id", "corporate_needs_snapshot"}
         kwargs = {k: v for k, v in raw.items() if k in allowed}
         try:
             return ChatSession(**kwargs, messages=msgs, run_history=runs)

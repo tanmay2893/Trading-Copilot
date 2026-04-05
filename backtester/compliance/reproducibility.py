@@ -53,10 +53,12 @@ def _rebuild_strategy(
     Rebuild strategy from initial_strategy + change_requests.
     Returns final code or None on failure.
     """
+    from backtester.data.corporate import detect_corporate_needs
     from backtester.engine.iteration_engine import run_iteration_loop
     from backtester.engine.refine_engine import run_refine_turn
     from backtester.engine.session import RefineSession
 
+    _cn = detect_corporate_needs(commands.initial_strategy)
     result = run_iteration_loop(
         provider=provider,
         strategy_description=commands.initial_strategy,
@@ -65,6 +67,7 @@ def _rebuild_strategy(
         verbose=False,
         interval=interval,
         has_corporate_data=has_corporate_data,
+        corporate_needs=_cn if _cn else None,
         on_progress=None,
     )
     if not result.success or not result.code:

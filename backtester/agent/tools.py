@@ -35,6 +35,32 @@ def _run_sync(fn, *args, **kwargs):
     return loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 
+def _corporate_data_dict_for_tool(data_df: pd.DataFrame) -> dict[str, Any]:
+    """Build a JSON-serializable summary of merged corporate/earnings columns for tool responses."""
+    out: dict[str, Any] = {
+        "ohlcv_plus_corporate_columns": list(data_df.columns),
+        "has_earnings_columns": "Is_Earnings_Day" in data_df.columns,
+    }
+    if "Is_Earnings_Day" not in data_df.columns:
+        out["note"] = (
+            "No earnings columns on this dataframe. Run a backtest or fetch_data with "
+            "include_corporate_events=true / include_earnings=true for an earnings-related strategy."
+        )
+        return out
+    es = data_df["Is_Earnings_Day"].fillna(False)
+    if es.dtype == object:
+        es = es.map(lambda x: str(x).strip().lower() in ("true", "1", "1.0", "yes"))
+    earn_mask = es.astype(bool)
+    cols = ["Date"] + [c for c in ("EPS_Estimate", "EPS_Actual", "EPS_Surprise_Pct") if c in data_df.columns]
+    earn_df = data_df.loc[earn_mask, cols].copy()
+    out["earnings_days_in_range"] = int(earn_mask.sum())
+    if earn_df.empty:
+        out["earnings_calendar"] = []
+    else:
+        out["earnings_calendar"] = json.loads(earn_df.to_json(orient="records", date_format="iso"))
+    return out
+
+
 def _save_strategy_version(
     session: ChatSession,
     code: str,
@@ -125,13 +151,24 @@ async def handle_run_backtest(
     has_corporate_data = False
     if corporate_needs:
         await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail=", ".join(sorted(corporate_needs))))
+        corp_failed = False
+        corp_detail = ""
         try:
             corporate = await _run_sync(download_corporate_data, ticker, corporate_needs, start, end)
             data_df = merge_corporate_data(data_df, corporate)
             has_corporate_data = True
-        except Exception:
-            pass
-        await on_event(ProgressEvent(step="Fetching corporate data", status="success"))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Corporate data fetch/merge failed")
+            corp_failed = True
+            corp_detail = str(exc)
+        await on_event(
+            ProgressEvent(
+                step="Fetching corporate data",
+                status="failed" if corp_failed else "success",
+                detail=corp_detail if corp_failed else "merged",
+            )
+        )
 
     # -- Pre-flight analysis --
     from backtester.engine.strategy_analyzer import analyze_strategy, _build_corporate_summary
@@ -174,6 +211,7 @@ async def handle_run_backtest(
     session.active_strategy = strategy
     session.active_interval = resolved_interval
     session.active_data_df = data_df
+    session.corporate_needs_snapshot = sorted(corporate_needs) if corporate_needs else None
 
     total_attempts = 0
     max_retries = 2
@@ -188,6 +226,7 @@ async def handle_run_backtest(
             verbose=False,
             interval=resolved_interval,
             has_corporate_data=has_corporate_data,
+            corporate_needs=corporate_needs if corporate_needs else None,
             on_progress=_sync_progress,
         )
         total_attempts += result.attempts
@@ -196,11 +235,19 @@ async def handle_run_backtest(
             break
 
         if result.needs_intervention and result.diagnosis and hasattr(result.diagnosis, 'revised_strategy') and result.diagnosis.revised_strategy:
+            from backtester.data.corporate import relaxation_drops_earnings_constraint
             revised = result.diagnosis.revised_strategy
+            if relaxation_drops_earnings_constraint(strategy, revised):
+                await on_event(ProgressEvent(
+                    step="Strategy revision",
+                    status="failed",
+                    detail="Skipped: proposed relaxation would drop earnings-related requirements",
+                ))
+                break
             await on_event(ProgressEvent(
                 step="Strategy revision",
                 status="running",
-                detail=f"Auto-accepting relaxed strategy (was too restrictive)",
+                detail="Auto-accepting relaxed strategy (was too restrictive)",
             ))
             strategy = revised
             session.active_strategy = strategy
@@ -1150,8 +1197,11 @@ async def handle_fetch_data(
     start: str = "2020-01-01",
     end: str = "2025-01-01",
     interval: str = "1d",
+    include_corporate_events: bool = True,
+    include_earnings: bool = False,
     **kwargs,
 ) -> dict:
+    from backtester.data.corporate import detect_corporate_needs, download_corporate_data, merge_corporate_data
     from backtester.data.downloader import download_data
     from backtester.data.interval import clamp_date_range
 
@@ -1166,8 +1216,33 @@ async def handle_fetch_data(
 
     await on_event(ProgressEvent(step="Fetching data", status="success", detail=f"{len(data_df):,} rows"))
 
+    corporate_needs: set[str] = set()
+    if include_corporate_events:
+        if session.corporate_needs_snapshot:
+            corporate_needs |= set(session.corporate_needs_snapshot)
+        corporate_needs |= detect_corporate_needs(session.active_strategy or "")
+    if include_earnings:
+        corporate_needs.add("earnings")
+
+    if corporate_needs:
+        await on_event(
+            ProgressEvent(
+                step="Fetching corporate data",
+                status="running",
+                detail=", ".join(sorted(corporate_needs)),
+            )
+        )
+        try:
+            corporate = await _run_sync(download_corporate_data, ticker, corporate_needs, start, end)
+            data_df = merge_corporate_data(data_df, corporate)
+            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Corporate merge in fetch_data failed")
+            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+
     preview = data_df.head(5).to_dict(orient="records")
-    return {
+    result: dict[str, Any] = {
         "success": True,
         "ticker": ticker,
         "interval": interval,
@@ -1175,6 +1250,94 @@ async def handle_fetch_data(
         "columns": list(data_df.columns),
         "date_range": f"{data_df['Date'].iloc[0]} to {data_df['Date'].iloc[-1]}",
         "preview": json.dumps(preview, default=str),
+        "corporate": _corporate_data_dict_for_tool(data_df),
+    }
+    return result
+
+
+async def handle_get_corporate_data(
+    session: ChatSession,
+    on_event: Callback,
+    ticker: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    **kwargs,
+) -> dict:
+    """Return merged earnings (and related) corporate columns: prefer session data, else fetch."""
+    from backtester.data.corporate import download_corporate_data, merge_corporate_data
+    from backtester.data.downloader import download_data
+    from backtester.data.interval import clamp_date_range
+
+    ticker = ticker or session.active_ticker
+    if not ticker:
+        return {"success": False, "error": "No ticker. Pass ticker= or run a backtest first."}
+
+    interval = session.active_interval or "1d"
+    start = start or session.start_date or "2020-01-01"
+    end = end or session.end_date or "2025-12-31"
+    start, end, _ = clamp_date_range(start, end, interval)
+
+    df = session.active_data_df
+    use_session = (
+        df is not None
+        and not df.empty
+        and "Is_Earnings_Day" in df.columns
+        and session.active_ticker is not None
+        and ticker == session.active_ticker
+    )
+
+    if use_session:
+        data_df = df.copy()
+        dts = pd.to_datetime(data_df["Date"])
+        mask = (dts >= pd.Timestamp(start)) & (dts <= pd.Timestamp(end))
+        data_df = data_df.loc[mask].reset_index(drop=True)
+        await on_event(
+            ProgressEvent(
+                step="Corporate data",
+                status="success",
+                detail=f"from session ({len(data_df):,} rows in range)",
+            )
+        )
+    else:
+        await on_event(ProgressEvent(step="Downloading data", status="running", detail=ticker))
+        try:
+            data_df = await _run_sync(download_data, ticker, start, end, interval=interval)
+        except Exception as exc:
+            await on_event(ProgressEvent(step="Downloading data", status="failed", detail=str(exc)))
+            return {"success": False, "error": str(exc)}
+        await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail="earnings"))
+        try:
+            corporate = await _run_sync(
+                download_corporate_data, ticker, {"earnings"}, start, end
+            )
+            data_df = merge_corporate_data(data_df, corporate)
+            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("get_corporate_data fetch failed")
+            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+            return {"success": False, "error": str(exc)}
+
+    corp = _corporate_data_dict_for_tool(data_df)
+    rows = corp.get("earnings_calendar") or []
+    if rows:
+        headers = list(rows[0].keys())
+        table_rows = [[str(r.get(h, "")) for h in headers] for r in rows[:80]]
+        await on_event(
+            TableEvent(
+                title=f"Earnings calendar ({ticker}) — {corp.get('earnings_days_in_range', 0)} day(s) in range",
+                headers=headers,
+                rows=table_rows,
+            )
+        )
+
+    return {
+        "success": True,
+        "ticker": ticker,
+        "interval": interval,
+        "date_range": f"{start} to {end}",
+        "source": "session_active_data_df" if use_session else "fetched",
+        **corp,
     }
 
 
@@ -1228,6 +1391,21 @@ async def handle_rerun_on_ticker(
         return {"success": False, "error": f"Data download failed: {exc}"}
     await on_event(ProgressEvent(step="Downloading data", status="success", detail=f"{len(data_df):,} rows"))
 
+    strategy_nl = session.active_strategy or ""
+    from backtester.data.corporate import detect_corporate_needs, download_corporate_data, merge_corporate_data
+
+    corporate_needs = detect_corporate_needs(strategy_nl)
+    if corporate_needs:
+        await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail=", ".join(sorted(corporate_needs))))
+        try:
+            corporate = await _run_sync(download_corporate_data, ticker, corporate_needs, start, end)
+            data_df = merge_corporate_data(data_df, corporate)
+            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Corporate data merge failed on rerun")
+            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+
     await on_event(ProgressEvent(step="Running backtest", status="running", detail="reusing strategy code"))
     exec_result = await _run_sync(
         execute_strategy,
@@ -1245,7 +1423,14 @@ async def handle_rerun_on_ticker(
     await on_event(ProgressEvent(step="Running backtest", status="success", detail=f"{exec_result.signal_count} signals"))
 
     await on_event(ProgressEvent(step="Validating output", status="running"))
-    validation = await _run_sync(validate_output, exec_result.output_df, data_df)
+    validation = await _run_sync(
+        validate_output,
+        exec_result.output_df,
+        data_df,
+        strategy_description=strategy_nl or None,
+        corporate_needs=corporate_needs if corporate_needs else None,
+        strategy_code=code_to_run,
+    )
     # Always emit code so the UI shows what was run (even when validation fails)
     await on_event(CodeEvent(code=code_to_run))
     if not validation.valid:
@@ -1315,6 +1500,7 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "get_trades_table": handle_get_trades_table,
     "get_backtesting_table": handle_get_backtesting_table,
     "fetch_data": handle_fetch_data,
+    "get_corporate_data": handle_get_corporate_data,
 }
 
 

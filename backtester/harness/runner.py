@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 
 import ast
+import numpy as np
 import pandas as pd
 
 try:
@@ -45,6 +46,29 @@ def _get_init_param_names(strategy_cls) -> list[str] | None:
     return out
 
 
+def _cell_to_bool(val) -> bool:
+    """Coerce CSV/string values to bool. str 'False' must become False (bool('False') is True in Python)."""
+    if pd.isna(val):
+        return False
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return val != 0
+    s = str(val).strip().lower()
+    return s in ("true", "1", "t", "yes")
+
+
+def _normalize_corporate_boolean_columns(df: pd.DataFrame) -> None:
+    """After read_csv, bool columns are often object strings; normalize for reliable filters."""
+    for col in ("Is_Earnings_Day", "Is_Ex_Dividend", "Is_Split_Day"):
+        if col not in df.columns:
+            continue
+        if df[col].dtype == bool:
+            df[col] = df[col].fillna(False).astype(bool)
+        else:
+            df[col] = df[col].map(_cell_to_bool)
+
+
 def _apply_param_overrides(strategy_cls, overrides: dict | None) -> None:
     """Apply class-level parameter overrides before instantiation (fallback when Strategy has no __init__ params)."""
     if not overrides:
@@ -61,6 +85,7 @@ def run_strategy_from_file(
 ) -> None:
     try:
         df = pd.read_csv(data_csv_path)
+        _normalize_corporate_boolean_columns(df)
         original_columns = list(df.columns)
         date_col = "date" if "date" in df.columns else "Date"
         if not pd.api.types.is_datetime64_any_dtype(df[date_col]):

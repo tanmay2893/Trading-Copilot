@@ -27,6 +27,7 @@ from backtester.engine.executor import ExecutionResult, execute_strategy
 from backtester.engine.invariants import (
     check_refinement_invariants,
 )
+from backtester.data.corporate import detect_corporate_needs, relaxation_drops_earnings_constraint
 from backtester.engine.validator import ValidationResult, validate_output
 from backtester.llm.base import BaseLLMProvider
 from backtester.prompts.templates import SYSTEM_PROMPT
@@ -85,6 +86,7 @@ def run_iteration_loop(
     verbose: bool = False,
     interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set | None = None,
     on_progress: Callable | None = None,
 ) -> IterationResult:
     from backtester.engine.strategy_analyzer import review_strategy_code, diagnose_stuck_loop
@@ -111,6 +113,7 @@ def run_iteration_loop(
                 code, llm_resp = generate_strategy_code(
                     provider, strategy_description, data_df,
                     interval=interval, has_corporate_data=has_corporate_data,
+                    corporate_needs=corporate_needs,
                 )
                 result.total_input_tokens += llm_resp.input_tokens
                 result.total_output_tokens += llm_resp.output_tokens
@@ -134,6 +137,7 @@ def run_iteration_loop(
                     review_data["fix_instructions"],
                     data_df,
                     interval=interval, has_corporate_data=has_corporate_data,
+                    corporate_needs=corporate_needs,
                 )
                 result.total_input_tokens += llm_resp.input_tokens
                 result.total_output_tokens += llm_resp.output_tokens
@@ -174,7 +178,13 @@ def run_iteration_loop(
                         s.succeed(diag.root_cause)
                     _emit("Diagnosing stuck loop", "success", diag.root_cause)
 
-                    if diag.root_cause in ("strategy_too_restrictive", "data_issue") and diag.revised_strategy:
+                    if (
+                        diag.root_cause in ("strategy_too_restrictive", "data_issue")
+                        and diag.revised_strategy
+                        and not relaxation_drops_earnings_constraint(
+                            strategy_description, diag.revised_strategy
+                        )
+                    ):
                         result.needs_intervention = True
                         result.diagnosis = diag
                         return result
@@ -189,6 +199,7 @@ def run_iteration_loop(
                         provider, strategy_description, current_code,
                         f"{err_type}: {err_msg}", error_counter[error_signature], data_df,
                         interval=interval, has_corporate_data=has_corporate_data,
+                        corporate_needs=corporate_needs,
                     )
                     result.total_input_tokens += llm_resp.input_tokens
                     result.total_output_tokens += llm_resp.output_tokens
@@ -206,6 +217,7 @@ def run_iteration_loop(
                         result.error_history, data_df,
                         include_sample=include_sample,
                         interval=interval, has_corporate_data=has_corporate_data,
+                        corporate_needs=corporate_needs,
                     )
                     result.total_input_tokens += llm_resp.input_tokens
                     result.total_output_tokens += llm_resp.output_tokens
@@ -244,7 +256,13 @@ def run_iteration_loop(
         # --- Phase 3: Validate ---
         _emit("Validating output", "running")
         with step("Validating output") as s:
-            validation = validate_output(exec_result.output_df, data_df)
+            validation = validate_output(
+                exec_result.output_df,
+                data_df,
+                strategy_description=strategy_description,
+                corporate_needs=corporate_needs,
+                strategy_code=current_code,
+            )
             if validation.valid:
                 s.succeed(f"all {len(validation.test_results)} tests passed")
             else:
@@ -417,7 +435,14 @@ Fix the Strategy class to resolve this issue. Output ONLY the full Python code."
             continue
 
         with step("Validating output") as s:
-            validation = validate_output(exec_result.output_df, data_df)
+            _corp = detect_corporate_needs(artifacts.strategy_description or "")
+            validation = validate_output(
+                exec_result.output_df,
+                data_df,
+                strategy_description=artifacts.strategy_description,
+                corporate_needs=_corp if _corp else None,
+                strategy_code=current_code,
+            )
             if validation.valid:
                 s.succeed("all tests passed")
             else:

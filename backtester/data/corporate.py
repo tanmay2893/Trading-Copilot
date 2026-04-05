@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -10,6 +11,8 @@ import pandas as pd
 import yfinance as yf
 
 from backtester.config import CACHE_DIR
+
+log = logging.getLogger(__name__)
 
 CACHE_MAX_AGE_SEC = 24 * 60 * 60
 
@@ -77,6 +80,17 @@ def detect_corporate_needs(strategy_text: str) -> set[str]:
     return needs
 
 
+def relaxation_drops_earnings_constraint(
+    original_strategy: str, revised_strategy: str | None
+) -> bool:
+    """True if a diagnosis 'revised_strategy' removes earnings-related wording from the request."""
+    if not revised_strategy or not str(revised_strategy).strip():
+        return False
+    orig = detect_corporate_needs(original_strategy)
+    rev = detect_corporate_needs(str(revised_strategy))
+    return "earnings" in orig and "earnings" not in rev
+
+
 def has_corporate_columns(df: pd.DataFrame) -> bool:
     """Check whether a DataFrame already contains any corporate event columns."""
     return any(col in df.columns for col in ALL_CORPORATE_COLUMNS)
@@ -106,6 +120,15 @@ def download_corporate_data(
 
     if "earnings" in needs:
         result["earnings"] = _fetch_earnings(t, yf_ticker, start, end)
+        if result["earnings"].empty:
+            log.warning(
+                "Earnings calendar empty for %s (yfinance=%s) %s..%s — "
+                "check network/API; strategy will see no Is_Earnings_Day True rows",
+                ticker,
+                yf_ticker,
+                start,
+                end,
+            )
 
     return result
 
@@ -151,7 +174,10 @@ def merge_corporate_data(
             earn = earn.drop(columns=["Date"])
             df = df.merge(earn, on="_merge_date", how="left")
 
-        df["Is_Earnings_Day"] = df.get("Is_Earnings_Day", pd.Series(dtype="bool")).fillna(False)
+        if "Is_Earnings_Day" in df.columns:
+            df["Is_Earnings_Day"] = df["Is_Earnings_Day"].fillna(False).astype(bool)
+        else:
+            df["Is_Earnings_Day"] = False
 
         if not earn.empty:
             earnings_dates = sorted(earn["_merge_date"].dropna().unique())
@@ -248,10 +274,22 @@ def _fetch_splits(t: yf.Ticker, ticker: str, start: str, end: str) -> pd.DataFra
 
 
 def _fetch_earnings(t: yf.Ticker, ticker: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch earnings calendar from yfinance ``Ticker.earnings_dates`` and normalize dates.
+
+    Dates are aligned to US/Eastern calendar days (yfinance reports after-hours times in local TZ)
+    so they merge cleanly onto daily OHLCV bars. Empty results are **not** cached (avoids caching
+    transient API failures for 24h).
+    """
     cache = _cache_path(ticker, "earnings", start, end)
     cached = _read_cache(cache)
-    if cached is not None:
+    if cached is not None and not cached.empty:
         return cached
+    # Stale or poisoned empty cache: drop so we refetch
+    if cached is not None and cached.empty:
+        try:
+            cache.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     try:
         earn = t.earnings_dates
@@ -259,18 +297,19 @@ def _fetch_earnings(t: yf.Ticker, ticker: str, start: str, end: str) -> pd.DataF
         earn = None
 
     if earn is None or earn.empty:
-        empty = pd.DataFrame(
+        return pd.DataFrame(
             columns=["Date", "Is_Earnings_Day", "EPS_Estimate", "EPS_Actual", "EPS_Surprise_Pct"]
         )
-        _write_cache(empty, cache)
-        return empty
 
     df = earn.reset_index()
-    date_col = df.columns[0]
-    df = df.rename(columns={date_col: "Date"})
-    df["Date"] = pd.to_datetime(df["Date"])
-    if hasattr(df["Date"].dt, "tz") and df["Date"].dt.tz is not None:
-        df["Date"] = df["Date"].dt.tz_localize(None)
+    # yfinance uses "Earnings Date" as index name; do not rely on column order.
+    if "Earnings Date" in df.columns:
+        df = df.rename(columns={"Earnings Date": "Date"})
+    elif "Date" not in df.columns:
+        df = df.rename(columns={df.columns[0]: "Date"})
+
+    df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_convert("America/New_York")
+    df["Date"] = df["Date"].dt.normalize().dt.tz_localize(None)
 
     rename_map = {}
     for col in df.columns:
@@ -299,7 +338,8 @@ def _fetch_earnings(t: yf.Ticker, ticker: str, start: str, end: str) -> pd.DataF
     mask = (df["Date"] >= pd.Timestamp(start)) & (df["Date"] <= pd.Timestamp(end))
     df = df.loc[mask].reset_index(drop=True)
 
-    _write_cache(df, cache)
+    if not df.empty:
+        _write_cache(df, cache)
     return df
 
 

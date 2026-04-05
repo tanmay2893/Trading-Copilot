@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,7 +13,13 @@ class TestResult:
     message: str
 
 
-def run_tests(signals_df: pd.DataFrame, data_df: pd.DataFrame) -> list[TestResult]:
+def run_tests(
+    signals_df: pd.DataFrame,
+    data_df: pd.DataFrame,
+    strategy_description: str | None = None,
+    corporate_needs: set[str] | None = None,
+    strategy_code: str | None = None,
+) -> list[TestResult]:
     results: list[TestResult] = []
     date_col = "date" if "date" in data_df.columns else "Date"
     data_dates = pd.to_datetime(data_df[date_col])
@@ -132,5 +140,63 @@ def run_tests(signals_df: pd.DataFrame, data_df: pd.DataFrame) -> list[TestResul
                 "Signals are not in chronological order",
             )
         )
+
+    # Earnings: use corporate_needs from the original user query when set (survives preflight rewrites).
+    from backtester.data.corporate import detect_corporate_needs
+
+    earn_need = False
+    if corporate_needs is not None:
+        earn_need = "earnings" in corporate_needs
+    elif strategy_description:
+        earn_need = "earnings" in detect_corporate_needs(strategy_description)
+
+    if earn_need and strategy_code:
+        if "Is_Earnings_Day" not in strategy_code and "Days_To_Earnings" not in strategy_code:
+            results.append(
+                TestResult(
+                    "test_earnings_columns_in_code",
+                    False,
+                    "Strategy must reference Is_Earnings_Day and/or Days_To_Earnings in code when "
+                    "earnings are required (corporate data was loaded for this request)",
+                )
+            )
+        else:
+            results.append(
+                TestResult(
+                    "test_earnings_columns_in_code",
+                    True,
+                    "Code references earnings calendar columns",
+                )
+            )
+
+    # Data-driven cap: BUY count cannot exceed earnings rows when earnings are required.
+    if earn_need and "Is_Earnings_Day" in data_df.columns:
+        try:
+            earn_series = data_df["Is_Earnings_Day"].fillna(False)
+            if earn_series.dtype == object:
+                earn_series = earn_series.map(
+                    lambda x: str(x).strip().lower() in ("true", "1", "1.0", "yes")
+                )
+            n_earn = int(earn_series.astype(bool).sum())
+        except Exception:
+            n_earn = 0
+        if n_earn > 0:
+            if buy_count > n_earn:
+                results.append(
+                    TestResult(
+                        "test_earnings_entry_budget",
+                        False,
+                        f"Earnings-based entry: data has {n_earn} earnings day(s) but {buy_count} BUY "
+                        f"signals - cannot exceed one BUY per earnings event in range",
+                    )
+                )
+            else:
+                results.append(
+                    TestResult(
+                        "test_earnings_entry_budget",
+                        True,
+                        f"Earnings entry budget ok ({buy_count} BUY vs {n_earn} earnings days in data)",
+                    )
+                )
 
     return results

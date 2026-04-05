@@ -37,11 +37,13 @@ def generate_strategy_code(
     df: pd.DataFrame,
     interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set | None = None,
 ) -> tuple[str, LLMResponse]:
     cols, dtypes, sample, count = _df_info(df)
     prompt = build_codegen_prompt(
         strategy_description, cols, dtypes, sample, count,
         data_interval=interval, has_corporate_data=has_corporate_data,
+        corporate_needs=corporate_needs,
     )
     response = provider.generate(prompt, SYSTEM_PROMPT)
     code = extract_code(response.content)
@@ -60,6 +62,7 @@ def generate_fix_code(
     include_sample: bool = False,
     interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set | None = None,
 ) -> tuple[str, LLMResponse]:
     cols, _, sample, _ = _df_info(df)
     prompt = build_fix_prompt(
@@ -73,6 +76,7 @@ def generate_fix_code(
         sample_rows=sample if include_sample else "",
         data_interval=interval,
         has_corporate_data=has_corporate_data,
+        corporate_needs=corporate_needs,
     )
     response = provider.generate(prompt, SYSTEM_PROMPT)
     code = extract_code(response.content)
@@ -88,6 +92,7 @@ def generate_anti_loop_code(
     df: pd.DataFrame,
     interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set | None = None,
 ) -> tuple[str, LLMResponse]:
     cols, _, sample, _ = _df_info(df)
     prompt = build_anti_loop_prompt(
@@ -99,6 +104,7 @@ def generate_anti_loop_code(
         sample_rows=sample,
         data_interval=interval,
         has_corporate_data=has_corporate_data,
+        corporate_needs=corporate_needs,
     )
     response = provider.generate(prompt, SYSTEM_PROMPT)
     code = extract_code(response.content)
@@ -114,6 +120,7 @@ def generate_review_fix_code(
     df: pd.DataFrame,
     interval: str = "1d",
     has_corporate_data: bool = False,
+    corporate_needs: set | None = None,
 ) -> tuple[str, LLMResponse]:
     """Generate fixed code based on post-execution review feedback."""
     cols, _, sample, _ = _df_info(df)
@@ -126,6 +133,7 @@ def generate_review_fix_code(
         sample_rows=sample,
         data_interval=interval,
         has_corporate_data=has_corporate_data,
+        corporate_needs=corporate_needs,
     )
     response = provider.generate(prompt, SYSTEM_PROMPT)
     code = extract_code(response.content)

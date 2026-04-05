@@ -12,7 +12,8 @@ You have access to tools that let you:
 - Fix issues in previously generated strategies
 - Query and analyze backtest results (signals, trades, statistics)
 - Show the generated strategy code
-- Fetch and preview market data
+- Fetch and preview market data (optionally with merged corporate/earnings columns)
+- Load and display corporate earnings calendar data (`get_corporate_data`)
 
 Stocks can be **US** (e.g. AAPL, MSFT) or **Indian** (e.g. RELIANCE, TCS). Use the
 symbol as listed in the ticker list (US and India). Data for Indian stocks is fetched
@@ -106,6 +107,13 @@ via NSE (.NS) or BSE (.BO) automatically.
    `run_custom_analysis`. If the tool returns an error (e.g. no backtest data), report
    that and suggest running a backtest first. Present only the tool's answer; do not
    show or mention the generated helper code.
+16. **Corporate / earnings data**: The platform fetches earnings calendars from yfinance
+   and merges them into OHLCV when the strategy mentions earnings (and on request). You
+   **do** have access to this via tools—do **not** say you lack corporate earnings data.
+   When the user asks to see earnings dates, EPS estimates, or "corporate data", call
+   `get_corporate_data` (uses the current session ticker/date range when available) or
+   `fetch_data` with `include_earnings=true`. Summarize the returned `earnings_calendar`
+   and `earnings_days_in_range` from the tool result.
 """
 
 
@@ -341,7 +349,8 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "fetch_data",
             "description": (
                 "Download and preview market data for a ticker without running "
-                "a backtest. Use when the user wants to see data before testing."
+                "a backtest. Use when the user wants to see data before testing. "
+                "Set include_earnings=true to merge earnings calendar columns (Is_Earnings_Day, EPS) from yfinance."
             ),
             "parameters": {
                 "type": "object",
@@ -362,8 +371,47 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "description": "Data interval. Default '1d'",
                     },
+                    "include_corporate_events": {
+                        "type": "boolean",
+                        "description": "If true (default), merge corporate events implied by session strategy / snapshot (earnings, dividends, splits).",
+                    },
+                    "include_earnings": {
+                        "type": "boolean",
+                        "description": "If true, always merge earnings calendar for this ticker/range (use when user asks for earnings data). Default false.",
+                    },
                 },
                 "required": ["ticker"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_corporate_data",
+            "description": (
+                "Return the merged corporate earnings calendar for a ticker: dates where "
+                "Is_Earnings_Day is true, plus EPS estimate/actual/surprise when available. "
+                "Uses session merged OHLCV if a backtest was already run for the same ticker; "
+                "otherwise downloads and merges from yfinance. Use when the user asks to see "
+                "earnings dates, corporate earnings data, or to verify earnings vs price data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Optional. Defaults to session active ticker.",
+                    },
+                    "start": {
+                        "type": "string",
+                        "description": "Optional start YYYY-MM-DD. Defaults to session or broad range.",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "Optional end YYYY-MM-DD.",
+                    },
+                },
+                "required": [],
             },
         },
     },
