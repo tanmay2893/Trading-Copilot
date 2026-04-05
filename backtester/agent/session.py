@@ -177,10 +177,45 @@ class ChatSession:
                 lines.append(f"[Tool result: {content[:200]}...]" if len(content) > 200 else f"[Tool result: {content}]")
         return "\n".join(lines) if lines else "No prior messages."
 
+    @staticmethod
+    def _llm_suffix_valid(msgs: list[ChatMessage]) -> bool:
+        """True if msgs is a valid prefix of a chat for tool-aware APIs (no orphan tool rows)."""
+        pending: set[str] = set()
+        for msg in msgs:
+            role = msg.role
+            if role == "assistant":
+                if pending:
+                    return False
+                if msg.tool_calls:
+                    pending = {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
+            elif role == "tool":
+                tid = msg.tool_call_id
+                if not tid or tid not in pending:
+                    return False
+                pending.discard(tid)
+            elif role == "user":
+                if pending:
+                    return False
+        return not pending
+
+    def _expand_suffix_start_for_integrity(self, start: int, n: int) -> int:
+        """Move start earlier until messages[start:n] has no dangling tool_call/tool pairs."""
+        while start < n and not self._llm_suffix_valid(self.messages[start:n]):
+            start -= 1
+        return max(0, start)
+
     def to_llm_messages(self, token_budget: int = TOKEN_BUDGET) -> list[dict]:
-        """Serialize message history for the LLM, respecting a token budget."""
-        result: list[dict] = []
-        used = 0
+        """Serialize message history for the LLM, respecting a token budget.
+
+        Keeps the **newest** messages and drops older ones when over budget (plus a
+        short system notice). Oldest messages are removed first.
+        """
+        n = len(self.messages)
+        if n == 0:
+            return []
+
+        entries: list[dict] = []
+        estimates: list[int] = []
         for msg in self.messages:
             entry: dict = {"role": msg.role, "content": msg.content}
             if msg.tool_calls:
@@ -189,16 +224,33 @@ class ChatSession:
                 entry["tool_call_id"] = msg.tool_call_id
             if msg.name:
                 entry["name"] = msg.name
-
             est = max(1, len(json.dumps(entry)) // 4)
-            if used + est > token_budget and len(result) > 4:
-                result.insert(0, {
-                    "role": "system",
-                    "content": f"[Earlier conversation truncated — {len(self.messages) - len(result)} messages omitted]",
-                })
+            entries.append(entry)
+            estimates.append(est)
+
+        # Greedy suffix from the end: mirror old rule — first 5 messages in the suffix
+        # may exceed budget; after that, stop before adding an older message if over budget.
+        used = 0
+        start = n
+        for i in range(n - 1, -1, -1):
+            est = estimates[i]
+            already = n - i - 1
+            if used + est > token_budget and already > 4:
                 break
-            result.append(entry)
             used += est
+            start = i
+
+        start = self._expand_suffix_start_for_integrity(start, n)
+
+        result = entries[start:]
+        omitted = start
+        if omitted > 0:
+            result.insert(0, {
+                "role": "system",
+                "content": (
+                    f"[Earlier conversation truncated — {omitted} older message(s) omitted]"
+                ),
+            })
         return result
 
     # -- Persistence --
