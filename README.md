@@ -7,11 +7,21 @@
 
 The Python package is **`backtester`** (`pip install -e .`, see `pyproject.toml`).
 
-[Run with Docker](#run-with-docker) · [Run manually](#run-manually-backend--frontend) · [Web app](#web-app) · [CLI](#cli-quick-start) · [How it works](#how-it-works) · [LLM keys](#llm-providers)
+[Workflow](#workflow-like-claude-code-for-trading-strategies) · [Run with Docker](#run-with-docker) · [Run manually](#run-manually-backend--frontend) · [Web app](#web-app) · [CLI](#cli-quick-start) · [How it works](#how-it-works) · [LLM keys](#llm-providers)
 
 <p align="center">
   <img src="recordings/chart-msft-demo.png" alt="Sample price chart with backtest signals" width="720" />
 </p>
+
+---
+
+## Workflow: like Claude Code for trading strategies
+
+Think of Trading Copilot as **Claude Code, but for trading strategies**: the AI turns your plain-language idea into executable backtest code, and you steer it through concrete feedback. **Models can be wrong**—bad signals, edge-case bugs, or indicators that do not match what you meant—so the product is built for the same loop you use with agentic coding tools: you **run** a version, **inspect** what happened, and **send bugs or errors back in chat** (stack traces, weird dates, “too many buys in Q1,” etc.) to get a **corrected** strategy.
+
+You are not guessing in the dark. Open the **chart** with **buy/sell markers** and **toggle the indicators** that your algorithm uses (moving averages, ADX, volume, and so on) so your report to the assistant is grounded in what you see on the price series. Each fix lands as a **new saved version**; **older versions stay** in the workspace so you can compare code, rerun an earlier variant, or keep iterating without losing history.
+
+**Rerun** lets you exercise the **same** strategy on another **company (ticker)** or another **date range** without rewriting the prompt from scratch. After a successful run, you can also kick off **batch backtests across all supported US or Indian stocks** to get a **report-style view** of how the strategy behaved across the full universe the app covers (see the action chips in chat).
 
 ---
 
@@ -111,7 +121,7 @@ Open **Settings** from the sidebar (gear icon). Paste **OpenAI**, **Anthropic**,
 
 ### Chat, backtest summary, and next steps
 
-After a run, the assistant explains **signal counts**, dates, and plain-language results. Action chips let you **run the same strategy on other tickers**, **rerun on all US or Indian stocks** (batch flows), or start **paper-trade preparation** (reproducibility checks). You can keep asking questions in the same thread to tweak logic or interpret output.
+After a run, the assistant explains **signal counts**, dates, and plain-language results. Action chips let you **run the same strategy on other tickers**, **rerun on all US or Indian stocks** (batch flows), or start **paper-trade preparation** (reproducibility checks). You can keep asking questions in the same thread to tweak logic or interpret output. For the full **iterate-with-chart** workflow (errors in chat, preserved versions), see [Workflow: like Claude Code for trading strategies](#workflow-like-claude-code-for-trading-strategies).
 
 <p align="center">
   <img src="recordings/readme-ui-chat-backtest.png" alt="Chat showing MSFT backtest summary, strategy actions, and Strategies side panel" width="920" />
