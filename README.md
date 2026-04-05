@@ -349,6 +349,11 @@ Areas where the project can grow; contributions and design discussion are welcom
 
 - **Backtest realism** — Default runs are research-oriented: fees, slippage, spread, partial fills, and short borrow costs are not fully modeled; bar-level timing (open vs close vs intraday) may differ from how you would execute live.
 
+- **Risk-adjusted metrics and elaborative evaluation** — Summaries today lean on trade lists and descriptive stats (win rate, profit factor, consecutive wins/losses, etc.). A richer research layer would add **risk-adjusted performance** computed from an **equity or return curve** aligned with the backtest timeline (not only disconnected round-trip trades):
+  - **Ratios:** **Sharpe** (excess return per unit of volatility, with an agreed annualization and risk-free rate), **Sortino** (penalize downside volatility only), **Calmar** (return over **maximum drawdown**), plus standard **max drawdown** depth and duration.
+  - **Elaborative evaluation:** **Benchmark** comparison (e.g. buy-and-hold the same ticker over the window), **rolling** Sharpe or drawdown over sub-windows, **time in market** / exposure, and breakdowns by **calendar period** or **volatility regime** to see when the strategy works.
+  - **Depth:** Optional **Monte Carlo** or **bootstrap** bands on metrics, and careful handling of **autocorrelation** and **deflated** Sharpe for research credibility; wire results into CLI, API, and chat summaries once definitions match harness assumptions (position sizing, fees, and cash).
+
 - **Data quality and coverage** — [yfinance](https://github.com/ranaroussi/yfinance) / Yahoo Finance data can be incomplete, restated, or misaligned with a broker’s feed; corporate calendars can have gaps. Broader symbol universes and batch reports add survivorship and selection effects to interpret carefully.
 
 - **Expressiveness** — Richer natural-language coverage for multi-asset, options, fundamentals, alternative data, and non-US venues would require new data pipelines and guardrails in codegen.
