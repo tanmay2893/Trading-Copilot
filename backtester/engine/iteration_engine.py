@@ -15,6 +15,25 @@ from typing import Callable
 
 import pandas as pd
 
+from backtester.progress_narrative import (
+    CODE_FROM_RULES,
+    DIAGNOSE_STUCK,
+    DRAFTING_FIX,
+    FIX_EXECUTION,
+    QUALITY_REVIEW,
+    REGENERATE,
+    REVIEW_FIX,
+    SIMULATE_TRADES,
+    UNDERSTANDING_ISSUE,
+    VALIDATE_SIGNALS,
+    detail_attempt,
+    detail_code_lines,
+    detail_fix_error,
+    detail_review_auto_accept,
+    detail_review_outcome,
+    detail_signals,
+    detail_validation_success,
+)
 from backtester.config import RUNS_DIR
 from backtester.engine.code_generator import (
     generate_anti_loop_code,
@@ -108,8 +127,8 @@ def run_iteration_loop(
 
         # --- Phase 1: Generate or Fix code ---
         if attempt == 1:
-            _emit("Generating strategy code", "running", f"attempt {attempt}/{max_iterations}")
-            with step("Generating strategy code", f"[{provider.__class__.__name__}]") as s:
+            _emit(CODE_FROM_RULES, "running", detail_attempt(attempt, max_iterations))
+            with step(CODE_FROM_RULES, f"[{provider.__class__.__name__}]") as s:
                 code, llm_resp = generate_strategy_code(
                     provider, strategy_description, data_df,
                     interval=interval, has_corporate_data=has_corporate_data,
@@ -118,19 +137,19 @@ def run_iteration_loop(
                 result.total_input_tokens += llm_resp.input_tokens
                 result.total_output_tokens += llm_resp.output_tokens
                 current_code = code
-                s.succeed(f"{_count_lines(code)} lines")
-            _emit("Generating strategy code", "success", f"{_count_lines(code)} lines")
+                s.succeed(detail_code_lines(_count_lines(code)))
+            _emit(CODE_FROM_RULES, "success", detail_code_lines(_count_lines(code)))
             is_review_fix_attempt = False
         elif pending_review_fix is not None:
             review_data = pending_review_fix
             pending_review_fix = None
             is_review_fix_attempt = True
-            _emit("Fixing code from review", "running", f"attempt {attempt}/{max_iterations}")
+            _emit(REVIEW_FIX, "running", detail_attempt(attempt, max_iterations))
             print_iteration_status(
                 attempt, max_iterations, "REVIEW",
                 "; ".join(review_data["issues"][:2])[:100],
             )
-            with step("Fixing code from review", f"[attempt {attempt}/{max_iterations}]"):
+            with step(REVIEW_FIX, f"[attempt {attempt}/{max_iterations}]"):
                 code, llm_resp = generate_review_fix_code(
                     provider, strategy_description, current_code,
                     review_data["issues"],
@@ -142,7 +161,7 @@ def run_iteration_loop(
                 result.total_input_tokens += llm_resp.input_tokens
                 result.total_output_tokens += llm_resp.output_tokens
                 current_code = code
-            _emit("Fixing code from review", "success")
+            _emit(REVIEW_FIX, "success")
         else:
             is_review_fix_attempt = False
             last_err = result.error_history[-1] if result.error_history else {}
@@ -161,8 +180,8 @@ def run_iteration_loop(
                         attempt, max_iterations, "STUCK",
                         f"Anti-loop fired {anti_loop_cycles}x — diagnosing via LLM"
                     )
-                    _emit("Diagnosing stuck loop", "running")
-                    with step("Diagnosing stuck loop", "LLM") as s:
+                    _emit(DIAGNOSE_STUCK, "running")
+                    with step(DIAGNOSE_STUCK, "LLM") as s:
                         diag = diagnose_stuck_loop(
                             provider=provider,
                             strategy_description=strategy_description,
@@ -176,7 +195,7 @@ def run_iteration_loop(
                         result.total_input_tokens += diag.input_tokens
                         result.total_output_tokens += diag.output_tokens
                         s.succeed(diag.root_cause)
-                    _emit("Diagnosing stuck loop", "success", diag.root_cause)
+                    _emit(DIAGNOSE_STUCK, "success", diag.root_cause)
 
                     if (
                         diag.root_cause in ("strategy_too_restrictive", "data_issue")
@@ -193,8 +212,8 @@ def run_iteration_loop(
                     attempt, max_iterations, "ANTI-LOOP",
                     f"Same error {error_counter[error_signature]}x — forcing new approach"
                 )
-                _emit("Regenerating strategy", "running", f"attempt {attempt}/{max_iterations}")
-                with step("Regenerating with new approach", f"[attempt {attempt}/{max_iterations}]"):
+                _emit(REGENERATE, "running", detail_attempt(attempt, max_iterations))
+                with step(REGENERATE, f"[attempt {attempt}/{max_iterations}]"):
                     code, llm_resp = generate_anti_loop_code(
                         provider, strategy_description, current_code,
                         f"{err_type}: {err_msg}", error_counter[error_signature], data_df,
@@ -205,12 +224,12 @@ def run_iteration_loop(
                     result.total_output_tokens += llm_resp.output_tokens
                     current_code = code
                     error_counter.clear()
-                _emit("Regenerating strategy", "success")
+                _emit(REGENERATE, "success")
             else:
                 include_sample = attempt >= 4
                 print_iteration_status(attempt, max_iterations, err_type, err_msg[:100])
-                _emit("Fixing code", "running", f"[{err_type}] attempt {attempt}/{max_iterations}")
-                with step("Fixing code", f"[attempt {attempt}/{max_iterations}]"):
+                _emit(FIX_EXECUTION, "running", f"{err_type} · {detail_attempt(attempt, max_iterations)}")
+                with step(FIX_EXECUTION, f"[attempt {attempt}/{max_iterations}]"):
                     code, llm_resp = generate_fix_code(
                         provider, strategy_description, current_code,
                         err_type, err_msg, err_tb,
@@ -222,7 +241,7 @@ def run_iteration_loop(
                     result.total_input_tokens += llm_resp.input_tokens
                     result.total_output_tokens += llm_resp.output_tokens
                     current_code = code
-                _emit("Fixing code", "success")
+                _emit(FIX_EXECUTION, "success")
 
         if verbose:
             print_code(current_code, f"Strategy (attempt {attempt})")
@@ -230,8 +249,8 @@ def run_iteration_loop(
         result.code = current_code
 
         # --- Phase 2: Execute ---
-        _emit("Running backtest", "running", f"attempt {attempt}/{max_iterations}")
-        with step("Running backtest", f"[attempt {attempt}/{max_iterations}]") as s:
+        _emit(SIMULATE_TRADES, "running", detail_attempt(attempt, max_iterations))
+        with step(SIMULATE_TRADES, f"[attempt {attempt}/{max_iterations}]") as s:
             exec_result = execute_strategy(current_code, data_df)
             if exec_result.success:
                 s.succeed(f"{exec_result.signal_count} signals in {exec_result.duration:.1f}s")
@@ -239,7 +258,7 @@ def run_iteration_loop(
                 s.fail(f"{exec_result.error_type}: {exec_result.error_message[:80]}")
 
         if not exec_result.success:
-            _emit("Running backtest", "failed", f"{exec_result.error_type}: {exec_result.error_message[:60]}")
+            _emit(SIMULATE_TRADES, "failed", detail_fix_error(exec_result.error_type, exec_result.error_message))
             if not is_review_fix_attempt:
                 consecutive_review_rejections = 0
             result.error_history.append({
@@ -251,11 +270,11 @@ def run_iteration_loop(
             })
             continue
 
-        _emit("Running backtest", "success", f"{exec_result.signal_count} signals")
+        _emit(SIMULATE_TRADES, "success", detail_signals(exec_result.signal_count))
 
         # --- Phase 3: Validate ---
-        _emit("Validating output", "running")
-        with step("Validating output") as s:
+        _emit(VALIDATE_SIGNALS, "running")
+        with step(VALIDATE_SIGNALS) as s:
             validation = validate_output(
                 exec_result.output_df,
                 data_df,
@@ -269,7 +288,7 @@ def run_iteration_loop(
                 s.fail(f"{len(validation.issues)} issue(s)")
 
         if not validation.valid:
-            _emit("Validating output", "failed", "; ".join(validation.issues)[:100])
+            _emit(VALIDATE_SIGNALS, "failed", "; ".join(validation.issues)[:100])
             if not is_review_fix_attempt:
                 consecutive_review_rejections = 0
             result.test_failures = validation.issues
@@ -282,18 +301,18 @@ def run_iteration_loop(
             })
             continue
 
-        _emit("Validating output", "success", f"all {len(validation.test_results)} tests passed")
+        _emit(VALIDATE_SIGNALS, "success", detail_validation_success(len(validation.test_results)))
 
         # --- Phase 4: LLM Code Review ---
         if consecutive_review_rejections >= MAX_REVIEW_REJECTIONS:
-            _emit("Reviewing code", "success", f"auto-accepted after {consecutive_review_rejections} review rejections")
+            _emit(QUALITY_REVIEW, "success", detail_review_auto_accept(consecutive_review_rejections))
             console.print(
                 f"  [yellow]⚠[/] Accepting code after {consecutive_review_rejections} consecutive "
                 f"review rejections (execution + validation passed)"
             )
         else:
-            _emit("Reviewing code", "running")
-            with step("Reviewing code", "LLM") as s:
+            _emit(QUALITY_REVIEW, "running")
+            with step(QUALITY_REVIEW, "LLM") as s:
                 review = review_strategy_code(
                     provider=provider,
                     strategy_description=strategy_description,
@@ -313,7 +332,7 @@ def run_iteration_loop(
                     s.fail(issue_preview)
 
             if review.verdict == "fix" and review.issues:
-                _emit("Reviewing code", "failed", "; ".join(review.issues[:2])[:80])
+                _emit(QUALITY_REVIEW, "failed", "; ".join(review.issues[:2])[:80])
                 consecutive_review_rejections += 1
                 result.error_history.append({
                     "attempt": attempt,
@@ -328,7 +347,7 @@ def run_iteration_loop(
                 }
                 continue
 
-            _emit("Reviewing code", "success", "approved")
+            _emit(QUALITY_REVIEW, "success", detail_review_outcome(True, ""))
 
         # --- Success ---
         result.success = True
@@ -361,7 +380,7 @@ def run_fix_loop(
     result = IterationResult()
     result.code = artifacts.generated_code
 
-    with step("Analyzing issue", "context engineering"):
+    with step(UNDERSTANDING_ISSUE, "context engineering"):
         context = build_context(issue, artifacts)
 
     chart_note = ""
@@ -398,7 +417,7 @@ Fix the Strategy class to resolve this issue. Output ONLY the full Python code."
     for attempt in range(1, max_iterations + 1):
         result.attempts = attempt
 
-        with step("Generating fix", f"[attempt {attempt}/{max_iterations}]"):
+        with step(DRAFTING_FIX, f"[attempt {attempt}/{max_iterations}]"):
             prompt = fix_prompt if attempt == 1 else _build_refix_prompt(
                 issue, current_code, result.error_history[-1] if result.error_history else {},
             )
@@ -417,10 +436,10 @@ Fix the Strategy class to resolve this issue. Output ONLY the full Python code."
 
         result.code = current_code
 
-        with step("Running backtest", f"[attempt {attempt}/{max_iterations}]") as s:
+        with step(SIMULATE_TRADES, f"[attempt {attempt}/{max_iterations}]") as s:
             exec_result = execute_strategy(current_code, data_df)
             if exec_result.success:
-                s.succeed(f"{exec_result.signal_count} signals")
+                s.succeed(detail_signals(exec_result.signal_count))
             else:
                 s.fail(f"{exec_result.error_type}")
 
@@ -434,7 +453,7 @@ Fix the Strategy class to resolve this issue. Output ONLY the full Python code."
             })
             continue
 
-        with step("Validating output") as s:
+        with step(VALIDATE_SIGNALS) as s:
             _corp = detect_corporate_needs(artifacts.strategy_description or "")
             validation = validate_output(
                 exec_result.output_df,

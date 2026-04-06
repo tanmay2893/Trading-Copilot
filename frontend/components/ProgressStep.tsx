@@ -24,15 +24,14 @@ export function ProgressStep({ step, status, detail }: ProgressStepProps) {
     );
 
   return (
-    <div className="flex items-center gap-2 py-0.5 font-mono text-xs">
-      {icon}
-      <span className="text-[var(--text-secondary)]">{step}</span>
-      {detail && (
-        <>
-          <span className="text-[var(--text-muted)]">&mdash;</span>
-          <span className="text-[var(--text-muted)]">{detail}</span>
-        </>
-      )}
+    <div className="flex gap-2.5 py-1.5">
+      <div className="flex-shrink-0 pt-0.5">{icon}</div>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm text-[var(--text-secondary)] leading-snug">{step}</div>
+        {detail ? (
+          <div className="text-xs text-[var(--text-muted)] mt-0.5 leading-relaxed">{detail}</div>
+        ) : null}
+      </div>
     </div>
   );
 }

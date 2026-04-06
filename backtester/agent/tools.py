@@ -24,6 +24,42 @@ from backtester.agent.events import (
     TableEvent,
     TextEvent,
 )
+from backtester.progress_narrative import (
+    ALIGN_STRATEGY,
+    ANALYZE_RESULTS,
+    BACKTEST_DONE,
+    CHART_ATTACHED,
+    CORPORATE_CONTEXT,
+    CUSTOM_ANALYSIS,
+    FETCH_PREVIEW,
+    FIX_STRATEGY,
+    LOAD_MARKET_DATA,
+    REFINE_STRATEGY,
+    SIMULATE_TRADES,
+    STRATEGY_REVISION,
+    VALIDATE_SIGNALS,
+    detail_analysis_running,
+    detail_analysis_skipped,
+    detail_analysis_success,
+    detail_backtest_failed_attempts,
+    detail_chart_missing,
+    detail_chart_sent,
+    detail_corporate_from_session,
+    detail_corporate_running,
+    detail_corporate_success,
+    detail_fix_error,
+    detail_validation_success,
+    detail_data_loaded,
+    detail_load_running,
+    detail_rerun_code,
+    detail_signals,
+    detail_signals_and_attempts,
+    detail_strategy_revision_blocked,
+    detail_strategy_revision_running,
+    detail_strategy_revision_success,
+    format_backtest_window_label,
+    interval_phrase,
+)
 from backtester.agent.session import AGENT_SESSIONS_DIR, ChatSession, RunSummary
 
 Callback = Callable[..., Awaitable[None]]
@@ -159,21 +195,21 @@ async def handle_run_backtest(
     start, end, was_clamped = clamp_date_range(start, end, resolved_interval)
 
     # -- Download data --
-    await on_event(ProgressEvent(step="Downloading data", status="running", detail=f"{ticker} {resolved_interval} {start}->{end}"))
+    await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="running", detail=detail_load_running(ticker, resolved_interval, start, end)))
     try:
         from backtester.data.downloader import download_data
         data_df = await _run_sync(download_data, ticker, start, end, interval=resolved_interval)
     except Exception as exc:
-        await on_event(ProgressEvent(step="Downloading data", status="failed", detail=str(exc)))
+        await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="failed", detail=str(exc)))
         return {"success": False, "error": f"Data download failed: {exc}"}
-    await on_event(ProgressEvent(step="Downloading data", status="success", detail=f"{len(data_df):,} rows"))
+    await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="success", detail=detail_data_loaded(len(data_df), ticker, resolved_interval, start, end)))
 
     # -- Corporate events --
     from backtester.data.corporate import detect_corporate_needs, download_corporate_data, merge_corporate_data
     corporate_needs = detect_corporate_needs(strategy)
     has_corporate_data = False
     if corporate_needs:
-        await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail=", ".join(sorted(corporate_needs))))
+        await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="running", detail=detail_corporate_running(corporate_needs)))
         corp_failed = False
         corp_detail = ""
         try:
@@ -187,15 +223,15 @@ async def handle_run_backtest(
             corp_detail = str(exc)
         await on_event(
             ProgressEvent(
-                step="Fetching corporate data",
+                step=CORPORATE_CONTEXT,
                 status="failed" if corp_failed else "success",
-                detail=corp_detail if corp_failed else "merged",
+                detail=corp_detail[:120] if corp_failed else detail_corporate_success(),
             )
         )
 
     # -- Pre-flight analysis --
     from backtester.engine.strategy_analyzer import analyze_strategy, _build_corporate_summary
-    await on_event(ProgressEvent(step="Analyzing strategy", status="running", detail="LLM"))
+    await on_event(ProgressEvent(step=ALIGN_STRATEGY, status="running", detail=detail_analysis_running()))
     try:
         corp_summary = _build_corporate_summary(data_df, corporate_needs) if corporate_needs else {}
         analysis = await _run_sync(
@@ -212,11 +248,11 @@ async def handle_run_backtest(
             corporate_needs=corporate_needs,
             corporate_summary=corp_summary,
         )
-        await on_event(ProgressEvent(step="Analyzing strategy", status="success", detail=analysis.verdict))
+        await on_event(ProgressEvent(step=ALIGN_STRATEGY, status="success", detail=detail_analysis_success(analysis.verdict)))
         if analysis.verdict == "revise" and analysis.revised_strategy:
             strategy = analysis.revised_strategy
     except Exception:
-        await on_event(ProgressEvent(step="Analyzing strategy", status="success", detail="skipped"))
+        await on_event(ProgressEvent(step=ALIGN_STRATEGY, status="success", detail=detail_analysis_skipped()))
 
     # -- Iteration loop (with auto-retry on intervention) --
     from backtester.engine.iteration_engine import run_iteration_loop
@@ -262,29 +298,33 @@ async def handle_run_backtest(
             revised = result.diagnosis.revised_strategy
             if relaxation_drops_earnings_constraint(strategy, revised):
                 await on_event(ProgressEvent(
-                    step="Strategy revision",
+                    step=STRATEGY_REVISION,
                     status="failed",
-                    detail="Skipped: proposed relaxation would drop earnings-related requirements",
+                    detail=detail_strategy_revision_blocked(),
                 ))
                 break
             await on_event(ProgressEvent(
-                step="Strategy revision",
+                step=STRATEGY_REVISION,
                 status="running",
-                detail="Auto-accepting relaxed strategy (was too restrictive)",
+                detail=detail_strategy_revision_running(),
             ))
             strategy = revised
             session.active_strategy = strategy
             await on_event(ProgressEvent(
-                step="Strategy revision",
+                step=STRATEGY_REVISION,
                 status="success",
-                detail="Retrying with relaxed conditions",
+                detail=detail_strategy_revision_success(),
             ))
             continue
 
         break
 
     if result.success:
-        await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{len(result.signals_df)} signals in {total_attempts} attempt(s)"))
+        await on_event(ProgressEvent(
+            step=BACKTEST_DONE,
+            status="success",
+            detail=detail_signals_and_attempts(len(result.signals_df), total_attempts),
+        ))
 
         session.active_code = result.code
         session.active_signals_df = result.signals_df
@@ -328,6 +368,8 @@ async def handle_run_backtest(
             "success": True,
             "ticker": ticker,
             "interval": resolved_interval,
+            "interval_label": interval_phrase(resolved_interval),
+            "window_label": format_backtest_window_label(start, end),
             "total_signals": len(result.signals_df),
             "buy_signals": buy_count,
             "sell_signals": sell_count,
@@ -338,7 +380,7 @@ async def handle_run_backtest(
             "strategy_version_id": version_id,
         }
     else:
-        await on_event(ProgressEvent(step="Backtest complete", status="failed", detail=f"failed after {total_attempts} attempts"))
+        await on_event(ProgressEvent(step=BACKTEST_DONE, status="failed", detail=detail_backtest_failed_attempts(total_attempts)))
         # Keep last attempted code and outputs so refine_strategy can use them as context
         # (e.g. user says "relax the RSI threshold to 40" after a failed run)
         if result.code:
@@ -404,7 +446,7 @@ async def handle_refine_strategy(
     # increase the number of BUY signals".
     baseline_signals_df = session.active_signals_df.copy() if session.active_signals_df is not None else None
 
-    await on_event(ProgressEvent(step="Refining strategy", status="running"))
+    await on_event(ProgressEvent(step=REFINE_STRATEGY, status="running"))
     result = await _run_sync(
         run_refine_turn,
         session=refine_session,
@@ -419,7 +461,7 @@ async def handle_refine_strategy(
     )
 
     if result.success:
-        await on_event(ProgressEvent(step="Refining strategy", status="success", detail=result.summary))
+        await on_event(ProgressEvent(step=REFINE_STRATEGY, status="success", detail=result.summary))
 
         session.active_code = result.code
         session.active_signals_df = result.signals_df
@@ -432,7 +474,11 @@ async def handle_refine_strategy(
         sell_count = int((result.signals_df["Signal"] == "SELL").sum()) if result.signals_df is not None else 0
         total_signals = len(result.signals_df) if result.signals_df is not None else 0
 
-        await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{total_signals} signals in {result.attempts} attempt(s)"))
+        await on_event(ProgressEvent(
+            step=BACKTEST_DONE,
+            status="success",
+            detail=detail_signals_and_attempts(total_signals, result.attempts),
+        ))
 
         version_id = _save_strategy_version(
             session,
@@ -452,7 +498,7 @@ async def handle_refine_strategy(
             "strategy_version_id": version_id,
         }
     else:
-        await on_event(ProgressEvent(step="Refining strategy", status="failed", detail=result.error_message))
+        await on_event(ProgressEvent(step=REFINE_STRATEGY, status="failed", detail=result.error_message))
         return {"success": False, "error": result.error_message}
 
 
@@ -496,11 +542,11 @@ async def handle_fix_strategy(
     session.pending_chart_image = None
 
     if chart_image:
-        await on_event(ProgressEvent(step="Chart attached", status="success", detail="sent to LLM"))
+        await on_event(ProgressEvent(step=CHART_ATTACHED, status="success", detail=detail_chart_sent()))
     else:
-        await on_event(ProgressEvent(step="Chart attached", status="failed", detail="no chart open"))
+        await on_event(ProgressEvent(step=CHART_ATTACHED, status="failed", detail=detail_chart_missing()))
 
-    await on_event(ProgressEvent(step="Fixing strategy", status="running", detail=issue[:80]))
+    await on_event(ProgressEvent(step=FIX_STRATEGY, status="running", detail=issue[:80]))
     result = await _run_sync(
         run_fix_loop,
         provider=provider,
@@ -515,7 +561,7 @@ async def handle_fix_strategy(
     )
 
     if result.success:
-        await on_event(ProgressEvent(step="Fixing strategy", status="success"))
+        await on_event(ProgressEvent(step=FIX_STRATEGY, status="success"))
 
         session.active_code = result.code
         session.active_signals_df = result.signals_df
@@ -528,7 +574,11 @@ async def handle_fix_strategy(
         sell_count = int((result.signals_df["Signal"] == "SELL").sum()) if result.signals_df is not None else 0
         total_signals = len(result.signals_df) if result.signals_df is not None else 0
 
-        await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{total_signals} signals in {result.attempts} attempt(s)"))
+        await on_event(ProgressEvent(
+            step=BACKTEST_DONE,
+            status="success",
+            detail=detail_signals_and_attempts(total_signals, result.attempts),
+        ))
 
         version_id = _save_strategy_version(
             session,
@@ -547,7 +597,7 @@ async def handle_fix_strategy(
             "strategy_version_id": version_id,
         }
     else:
-        await on_event(ProgressEvent(step="Fixing strategy", status="failed"))
+        await on_event(ProgressEvent(step=FIX_STRATEGY, status="failed"))
         return {"success": False, "error": f"Fix failed after {result.attempts} attempts"}
 
 
@@ -588,7 +638,7 @@ Write a short Python snippet that computes the answer. The snippet should:
 
 Output ONLY the Python code, no explanation."""
 
-    await on_event(ProgressEvent(step="Analyzing results", status="running"))
+    await on_event(ProgressEvent(step=ANALYZE_RESULTS, status="running"))
 
     resp = await _run_sync(provider.generate, prompt, "You are a data analysis assistant. Output only Python code.")
     code = _extract_code(resp.content)
@@ -602,7 +652,7 @@ Output ONLY the Python code, no explanation."""
     except Exception as exc:
         answer = f"Query failed: {exc}"
 
-    await on_event(ProgressEvent(step="Analyzing results", status="success"))
+    await on_event(ProgressEvent(step=ANALYZE_RESULTS, status="success"))
     return {"success": True, "answer": answer}
 
 
@@ -710,7 +760,7 @@ Use `data_df` to infer which exit condition was triggered per trade. If you need
 
 Write a short Python snippet that uses `df`, `trades`, and optionally `data_df` (and pd, np if needed) to compute the answer. Set the result in a variable `answer` (a string suitable to show the user). Output ONLY the Python code, no explanation."""
 
-    await on_event(ProgressEvent(step="Running custom analysis", status="running"))
+    await on_event(ProgressEvent(step=CUSTOM_ANALYSIS, status="running"))
 
     resp = await _run_sync(provider.generate, prompt, "You are a data analysis assistant. Output only Python code.")
     code = _extract_code(resp.content)
@@ -736,7 +786,7 @@ Write a short Python snippet that uses `df`, `trades`, and optionally `data_df` 
     except Exception as exc:
         answer = f"Analysis failed: {exc}"
 
-    await on_event(ProgressEvent(step="Running custom analysis", status="success"))
+    await on_event(ProgressEvent(step=CUSTOM_ANALYSIS, status="success"))
     # Return only answer so the agent presents the result without exposing helper code
     return {"success": True, "answer": answer}
 
@@ -1227,14 +1277,14 @@ async def handle_fetch_data(
 
     start, end, _ = clamp_date_range(start, end, interval)
 
-    await on_event(ProgressEvent(step="Fetching data", status="running", detail=f"{ticker} {interval}"))
+    await on_event(ProgressEvent(step=FETCH_PREVIEW, status="running", detail=detail_load_running(ticker, interval, start, end)))
     try:
         data_df = await _run_sync(download_data, ticker, start, end, interval=interval)
     except Exception as exc:
-        await on_event(ProgressEvent(step="Fetching data", status="failed", detail=str(exc)))
+        await on_event(ProgressEvent(step=FETCH_PREVIEW, status="failed", detail=str(exc)))
         return {"success": False, "error": str(exc)}
 
-    await on_event(ProgressEvent(step="Fetching data", status="success", detail=f"{len(data_df):,} rows"))
+    await on_event(ProgressEvent(step=FETCH_PREVIEW, status="success", detail=detail_data_loaded(len(data_df), ticker, interval, start, end)))
 
     corporate_needs: set[str] = set()
     if include_corporate_events:
@@ -1247,19 +1297,19 @@ async def handle_fetch_data(
     if corporate_needs:
         await on_event(
             ProgressEvent(
-                step="Fetching corporate data",
+                step=CORPORATE_CONTEXT,
                 status="running",
-                detail=", ".join(sorted(corporate_needs)),
+                detail=detail_corporate_running(corporate_needs),
             )
         )
         try:
             corporate = await _run_sync(download_corporate_data, ticker, corporate_needs, start, end)
             data_df = merge_corporate_data(data_df, corporate)
-            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="success", detail=detail_corporate_success()))
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception("Corporate merge in fetch_data failed")
-            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="failed", detail=str(exc)[:120]))
 
     preview = data_df.head(5).to_dict(orient="records")
     result: dict[str, Any] = {
@@ -1313,29 +1363,30 @@ async def handle_get_corporate_data(
         data_df = data_df.loc[mask].reset_index(drop=True)
         await on_event(
             ProgressEvent(
-                step="Corporate data",
+                step=CORPORATE_CONTEXT,
                 status="success",
-                detail=f"from session ({len(data_df):,} rows in range)",
+                detail=detail_corporate_from_session(len(data_df)),
             )
         )
     else:
-        await on_event(ProgressEvent(step="Downloading data", status="running", detail=ticker))
+        await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="running", detail=detail_load_running(ticker, interval, start, end)))
         try:
             data_df = await _run_sync(download_data, ticker, start, end, interval=interval)
         except Exception as exc:
-            await on_event(ProgressEvent(step="Downloading data", status="failed", detail=str(exc)))
+            await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="failed", detail=str(exc)))
             return {"success": False, "error": str(exc)}
-        await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail="earnings"))
+        await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="success", detail=detail_data_loaded(len(data_df), ticker, interval, start, end)))
+        await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="running", detail=detail_corporate_running({"earnings"})))
         try:
             corporate = await _run_sync(
                 download_corporate_data, ticker, {"earnings"}, start, end
             )
             data_df = merge_corporate_data(data_df, corporate)
-            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="success", detail=detail_corporate_success()))
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception("get_corporate_data fetch failed")
-            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="failed", detail=str(exc)[:120]))
             return {"success": False, "error": str(exc)}
 
     corp = _corporate_data_dict_for_tool(data_df)
@@ -1403,30 +1454,30 @@ async def handle_rerun_on_ticker(
         end = "2025-12-31"
     start, end, _ = clamp_date_range(start, end, interval)
 
-    await on_event(ProgressEvent(step="Downloading data", status="running", detail=f"{ticker} {interval}"))
+    await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="running", detail=detail_load_running(ticker, interval, start, end)))
     try:
         data_df = await _run_sync(download_data, ticker, start, end, interval=interval)
     except Exception as exc:
-        await on_event(ProgressEvent(step="Downloading data", status="failed", detail=str(exc)))
+        await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="failed", detail=str(exc)))
         return {"success": False, "error": f"Data download failed: {exc}"}
-    await on_event(ProgressEvent(step="Downloading data", status="success", detail=f"{len(data_df):,} rows"))
+    await on_event(ProgressEvent(step=LOAD_MARKET_DATA, status="success", detail=detail_data_loaded(len(data_df), ticker, interval, start, end)))
 
     strategy_nl = session.active_strategy or ""
     from backtester.data.corporate import detect_corporate_needs, download_corporate_data, merge_corporate_data
 
     corporate_needs = detect_corporate_needs(strategy_nl)
     if corporate_needs:
-        await on_event(ProgressEvent(step="Fetching corporate data", status="running", detail=", ".join(sorted(corporate_needs))))
+        await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="running", detail=detail_corporate_running(corporate_needs)))
         try:
             corporate = await _run_sync(download_corporate_data, ticker, corporate_needs, start, end)
             data_df = merge_corporate_data(data_df, corporate)
-            await on_event(ProgressEvent(step="Fetching corporate data", status="success", detail="merged"))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="success", detail=detail_corporate_success()))
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception("Corporate data merge failed on rerun")
-            await on_event(ProgressEvent(step="Fetching corporate data", status="failed", detail=str(exc)))
+            await on_event(ProgressEvent(step=CORPORATE_CONTEXT, status="failed", detail=str(exc)[:120]))
 
-    await on_event(ProgressEvent(step="Running backtest", status="running", detail="reusing strategy code"))
+    await on_event(ProgressEvent(step=SIMULATE_TRADES, status="running", detail=detail_rerun_code()))
     exec_result = await _run_sync(
         execute_strategy,
         code_to_run,
@@ -1435,14 +1486,14 @@ async def handle_rerun_on_ticker(
     )
 
     if not exec_result.success:
-        await on_event(ProgressEvent(step="Running backtest", status="failed", detail=exec_result.error_message[:80]))
+        await on_event(ProgressEvent(step=SIMULATE_TRADES, status="failed", detail=detail_fix_error(exec_result.error_type, exec_result.error_message)))
         return {
             "success": False,
             "error": f"Execution failed: [{exec_result.error_type}] {exec_result.error_message}",
         }
-    await on_event(ProgressEvent(step="Running backtest", status="success", detail=f"{exec_result.signal_count} signals"))
+    await on_event(ProgressEvent(step=SIMULATE_TRADES, status="success", detail=detail_signals(exec_result.signal_count)))
 
-    await on_event(ProgressEvent(step="Validating output", status="running"))
+    await on_event(ProgressEvent(step=VALIDATE_SIGNALS, status="running"))
     validation = await _run_sync(
         validate_output,
         exec_result.output_df,
@@ -1455,11 +1506,11 @@ async def handle_rerun_on_ticker(
     if rerun_ui_vid:
         await on_event(StrategyVersionEvent(version_id=rerun_ui_vid))
     if not validation.valid:
-        await on_event(ProgressEvent(step="Validating output", status="failed", detail="; ".join(validation.issues)[:80]))
+        await on_event(ProgressEvent(step=VALIDATE_SIGNALS, status="failed", detail="; ".join(validation.issues)[:80]))
         return {"success": False, "error": f"Validation failed: {'; '.join(validation.issues)}"}
-    await on_event(ProgressEvent(step="Validating output", status="success", detail=f"all {len(validation.test_results)} tests passed"))
+    await on_event(ProgressEvent(step=VALIDATE_SIGNALS, status="success", detail=detail_validation_success(len(validation.test_results))))
 
-    await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{exec_result.signal_count} signals"))
+    await on_event(ProgressEvent(step=BACKTEST_DONE, status="success", detail=detail_signals(exec_result.signal_count)))
 
     session.active_ticker = ticker
     session.active_data_df = data_df
@@ -1487,9 +1538,10 @@ async def handle_rerun_on_ticker(
     last_date = str(exec_result.output_df["Date"].iloc[-1]) if len(exec_result.output_df) > 0 else "N/A"
 
     summary = (
-        f"Backtest complete for **{ticker}** ({interval}): "
-        f"{exec_result.signal_count} signals ({buy_count} buy, {sell_count} sell), "
-        f"{first_date} to {last_date}."
+        f"Replayed your saved strategy on **{ticker}** ({interval_phrase(interval)}, "
+        f"{format_backtest_window_label(start, end)}): "
+        f"{exec_result.signal_count} signals ({buy_count} buys, {sell_count} sells), "
+        f"from **{first_date}** through **{last_date}**."
     )
     await on_event(TextEvent(content=summary))
 
