@@ -35,6 +35,29 @@ def _run_sync(fn, *args, **kwargs):
     return loop.run_in_executor(None, lambda: fn(*args, **kwargs))
 
 
+def _rerun_version_id_for_ui(
+    session_id: str,
+    explicit_version_id: str | None,
+    code_to_run: str,
+) -> str | None:
+    """Version id for StrategyVersionEvent on rerun: explicit pick, else last manifest entry if its file matches code."""
+    if explicit_version_id and explicit_version_id.strip():
+        return explicit_version_id.strip()
+    from backtester.compliance.manifest import load_manifest
+
+    manifest = load_manifest(session_id)
+    if not manifest:
+        return None
+    last = manifest[-1]
+    vid = last.get("version_id")
+    if not vid or not isinstance(vid, str):
+        return None
+    disk = ChatSession.get_strategy_code_for_version(session_id, vid)
+    if disk and disk.strip() == code_to_run.strip():
+        return vid
+    return None
+
+
 def _corporate_data_dict_for_tool(data_df: pd.DataFrame) -> dict[str, Any]:
     """Build a JSON-serializable summary of merged corporate/earnings columns for tool responses."""
     out: dict[str, Any] = {
@@ -262,7 +285,6 @@ async def handle_run_backtest(
 
     if result.success:
         await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{len(result.signals_df)} signals in {total_attempts} attempt(s)"))
-        await on_event(CodeEvent(code=result.code))
 
         session.active_code = result.code
         session.active_signals_df = result.signals_df
@@ -411,7 +433,6 @@ async def handle_refine_strategy(
         total_signals = len(result.signals_df) if result.signals_df is not None else 0
 
         await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{total_signals} signals in {result.attempts} attempt(s)"))
-        await on_event(CodeEvent(code=result.code))
 
         version_id = _save_strategy_version(
             session,
@@ -508,7 +529,6 @@ async def handle_fix_strategy(
         total_signals = len(result.signals_df) if result.signals_df is not None else 0
 
         await on_event(ProgressEvent(step="Backtest complete", status="success", detail=f"{total_signals} signals in {result.attempts} attempt(s)"))
-        await on_event(CodeEvent(code=result.code))
 
         version_id = _save_strategy_version(
             session,
@@ -1431,8 +1451,9 @@ async def handle_rerun_on_ticker(
         corporate_needs=corporate_needs if corporate_needs else None,
         strategy_code=code_to_run,
     )
-    # Always emit code so the UI shows what was run (even when validation fails)
-    await on_event(CodeEvent(code=code_to_run))
+    rerun_ui_vid = _rerun_version_id_for_ui(session.session_id, version_id, code_to_run)
+    if rerun_ui_vid:
+        await on_event(StrategyVersionEvent(version_id=rerun_ui_vid))
     if not validation.valid:
         await on_event(ProgressEvent(step="Validating output", status="failed", detail="; ".join(validation.issues)[:80]))
         return {"success": False, "error": f"Validation failed: {'; '.join(validation.issues)}"}
