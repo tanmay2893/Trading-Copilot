@@ -58,9 +58,11 @@ export function ParameterModal({
   const [searchRows, setSearchRows] = useState<ParameterSearchRow[]>([]);
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   const [sortState, setSortState] = useState<{ key: string; direction: "asc" | "desc" }>({
-    key: "total_return_pct",
+    key: "train_total_return_pct",
     direction: "desc",
   });
+  const [searchMetaNote, setSearchMetaNote] = useState<string | null>(null);
+  const [searchHistoryRange, setSearchHistoryRange] = useState<string | null>(null);
   const [applyingBest, setApplyingBest] = useState(false);
   const [savedVersionId, setSavedVersionId] = useState<string | null>(null);
   const [versionName, setVersionName] = useState("");
@@ -123,7 +125,9 @@ export function ParameterModal({
         setSelectedRowIndex(null);
         setSearchError(null);
         setSavedVersionId(null);
-        setSortState({ key: "total_return_pct", direction: "desc" });
+        setSearchMetaNote(null);
+        setSearchHistoryRange(null);
+        setSortState({ key: "train_total_return_pct", direction: "desc" });
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load parameters");
@@ -190,7 +194,9 @@ export function ParameterModal({
     setSearchRows([]);
     setSelectedRowIndex(null);
     setSavedVersionId(null);
-    setSortState({ key: "total_return_pct", direction: "desc" });
+    setSortState({ key: "train_total_return_pct", direction: "desc" });
+    setSearchMetaNote(null);
+    setSearchHistoryRange(null);
     try {
       const data = await runParameterSearch(sessionId, {
         ticker: ticker.symbol,
@@ -201,6 +207,18 @@ export function ParameterModal({
         max_combinations: 200,
       });
       setSearchRows(data.rows || []);
+      setSearchMetaNote(data.optimization_note ?? null);
+      if (data.history_start && data.history_end) {
+        const clamp = data.date_range_was_clamped ? " (range clamped to provider limits)" : "";
+        setSearchHistoryRange(
+          `${data.history_start} → ${data.history_end}${clamp}` +
+            (data.train_end_date && data.test_start_date
+              ? ` · train ends ${data.train_end_date}, test from ${data.test_start_date}`
+              : "")
+        );
+      } else {
+        setSearchHistoryRange(null);
+      }
       if (data.rows && data.rows.length > 0) {
         setSelectedRowIndex(0);
       }
@@ -279,11 +297,23 @@ export function ParameterModal({
 
   const sortableColumns = [
     ...parameters.map((p) => p.name),
+    "train_win_rate_pct",
+    "test_win_rate_pct",
+    "annual_return_gap",
+    "train_total_return_pct",
+    "test_total_return_pct",
+    "train_max_loss_pct",
+    "test_max_loss_pct",
+    "train_profit_factor",
+    "test_profit_factor",
+    "train_risk_reward",
+    "test_risk_reward",
     "win_rate_pct",
     "total_return_pct",
     "max_loss_pct",
     "profit_factor",
     "risk_reward",
+    "overfitting_risk",
     "success",
     "error",
   ];
@@ -319,7 +349,7 @@ export function ParameterModal({
       aria-modal="true"
       aria-labelledby="param-modal-title"
     >
-      <div className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] shadow-2xl overflow-hidden">
+      <div className="w-full max-w-5xl rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] shadow-2xl overflow-hidden">
         <div className="px-5 py-4 border-b border-[var(--border)]">
           <h2 id="param-modal-title" className="text-base font-semibold text-[var(--text-primary)]">
             Run strategy on {ticker.symbol === "ALL" ? ticker.name : ticker.symbol}
@@ -330,7 +360,7 @@ export function ParameterModal({
           </p>
         </div>
 
-        <div className="px-5 py-4 max-h-80 overflow-y-auto">
+        <div className="px-5 py-4 max-h-[min(560px,75vh)] overflow-y-auto">
           <div className="mb-4 grid grid-cols-2 gap-3">
             <div>
               <label
@@ -455,8 +485,19 @@ export function ParameterModal({
           {!loading && !error && parameters.length > 0 && mode === "optimize" && (
             <div className="space-y-3">
               <p className="text-xs text-[var(--text-muted)]">
-                Set start/end/step for each parameter, run combinations, then pick the best row.
+                Set start/end/step for each parameter. Search re-downloads the widest history for this symbol, scores each
+                combo on train (80%) vs test (20%) bars, then pick a row. Applying uses your Start/End dates above.
               </p>
+              {searchMetaNote && (
+                <p className="text-xs text-[var(--text-secondary)] rounded-md border border-[var(--border)] bg-[var(--bg-tertiary)] px-2 py-1.5">
+                  {searchMetaNote}
+                </p>
+              )}
+              {searchHistoryRange && (
+                <p className="text-[11px] text-[var(--text-muted)]" title={searchHistoryRange}>
+                  Data window: {searchHistoryRange}
+                </p>
+              )}
               {parameters.map((p) => (
                 <div key={`range-${p.name}`} className="space-y-1">
                   <label className="text-xs font-medium text-[var(--text-secondary)]">{p.name}</label>
@@ -498,8 +539,8 @@ export function ParameterModal({
               </div>
               {searchError && <p className="text-xs text-[var(--error)]">{searchError}</p>}
               {searchRows.length > 0 && (
-                <div className="border border-[var(--border)] rounded-lg overflow-auto max-h-44">
-                  <table className="w-full text-xs">
+                <div className="border border-[var(--border)] rounded-lg overflow-auto max-h-64">
+                  <table className="w-full text-xs whitespace-nowrap">
                     <thead className="bg-[var(--bg-tertiary)]">
                       <tr>
                         <th className="px-2 py-1 text-left">Pick</th>
@@ -511,28 +552,53 @@ export function ParameterModal({
                           </th>
                         ))}
                         <th className="px-2 py-1 text-left">
-                          <button type="button" onClick={() => toggleSort("win_rate_pct")} className="hover:underline">
-                            Win %{sortState.key === "win_rate_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          <button type="button" onClick={() => toggleSort("train_win_rate_pct")} className="hover:underline">
+                            Train Win %{sortState.key === "train_win_rate_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
                           </button>
                         </th>
                         <th className="px-2 py-1 text-left">
-                          <button type="button" onClick={() => toggleSort("total_return_pct")} className="hover:underline">
-                            Profit %{sortState.key === "total_return_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          <button type="button" onClick={() => toggleSort("test_win_rate_pct")} className="hover:underline">
+                            Test Win %{sortState.key === "test_win_rate_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
                           </button>
                         </th>
                         <th className="px-2 py-1 text-left">
-                          <button type="button" onClick={() => toggleSort("max_loss_pct")} className="hover:underline">
-                            Drawdown %{sortState.key === "max_loss_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          <button type="button" onClick={() => toggleSort("annual_return_gap")} className="hover:underline">
+                            Ann. gap{sortState.key === "annual_return_gap" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
                           </button>
                         </th>
                         <th className="px-2 py-1 text-left">
-                          <button type="button" onClick={() => toggleSort("profit_factor")} className="hover:underline">
-                            Profit factor{sortState.key === "profit_factor" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          <button type="button" onClick={() => toggleSort("train_total_return_pct")} className="hover:underline">
+                            Train est. annual %{sortState.key === "train_total_return_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
                           </button>
                         </th>
                         <th className="px-2 py-1 text-left">
-                          <button type="button" onClick={() => toggleSort("risk_reward")} className="hover:underline">
-                            Risk/Reward{sortState.key === "risk_reward" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          <button type="button" onClick={() => toggleSort("test_total_return_pct")} className="hover:underline">
+                            Test est. annual %{sortState.key === "test_total_return_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          </button>
+                        </th>
+                        <th className="px-2 py-1 text-left">
+                          <button type="button" onClick={() => toggleSort("train_max_loss_pct")} className="hover:underline">
+                            Train DD %{sortState.key === "train_max_loss_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          </button>
+                        </th>
+                        <th className="px-2 py-1 text-left">
+                          <button type="button" onClick={() => toggleSort("test_max_loss_pct")} className="hover:underline">
+                            Test DD %{sortState.key === "test_max_loss_pct" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          </button>
+                        </th>
+                        <th className="px-2 py-1 text-left">
+                          <button type="button" onClick={() => toggleSort("train_profit_factor")} className="hover:underline">
+                            Train PF{sortState.key === "train_profit_factor" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          </button>
+                        </th>
+                        <th className="px-2 py-1 text-left">
+                          <button type="button" onClick={() => toggleSort("test_profit_factor")} className="hover:underline">
+                            Test PF{sortState.key === "test_profit_factor" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
+                          </button>
+                        </th>
+                        <th className="px-2 py-1 text-left">
+                          <button type="button" onClick={() => toggleSort("overfitting_risk")} className="hover:underline">
+                            Overfit?{sortState.key === "overfitting_risk" ? (sortState.direction === "asc" ? " ↑" : " ↓") : ""}
                           </button>
                         </th>
                         <th className="px-2 py-1 text-left">
@@ -549,7 +615,10 @@ export function ParameterModal({
                     </thead>
                     <tbody>
                       {sortedRows.map((row, idx) => (
-                        <tr key={`row-${idx}`} className="border-t border-[var(--border)]">
+                        <tr
+                          key={`row-${idx}`}
+                          className={`border-t border-[var(--border)] ${row.overfitting_risk ? "bg-amber-500/10" : ""}`}
+                        >
                           <td className="px-2 py-1">
                             <input
                               type="radio"
@@ -561,13 +630,20 @@ export function ParameterModal({
                             />
                           </td>
                           {parameters.map((p) => <td key={`c-${idx}-${p.name}`} className="px-2 py-1">{String(row[p.name] ?? "")}</td>)}
-                          <td className="px-2 py-1">{row.win_rate_pct == null ? "-" : Number(row.win_rate_pct).toFixed(2)}</td>
-                          <td className="px-2 py-1">{row.total_return_pct == null ? "-" : Number(row.total_return_pct).toFixed(2)}</td>
-                          <td className="px-2 py-1">{row.max_loss_pct == null ? "-" : Number(row.max_loss_pct).toFixed(2)}</td>
-                          <td className="px-2 py-1">{row.profit_factor == null ? "-" : Number(row.profit_factor).toFixed(2)}</td>
-                          <td className="px-2 py-1">{row.risk_reward == null ? "-" : Number(row.risk_reward).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.train_win_rate_pct == null ? "-" : Number(row.train_win_rate_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.test_win_rate_pct == null ? "-" : Number(row.test_win_rate_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.annual_return_gap == null ? "-" : Number(row.annual_return_gap).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.train_total_return_pct == null ? "-" : Number(row.train_total_return_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.test_total_return_pct == null ? "-" : Number(row.test_total_return_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.train_max_loss_pct == null ? "-" : Number(row.train_max_loss_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.test_max_loss_pct == null ? "-" : Number(row.test_max_loss_pct).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.train_profit_factor == null ? "-" : Number(row.train_profit_factor).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.test_profit_factor == null ? "-" : Number(row.test_profit_factor).toFixed(2)}</td>
+                          <td className="px-2 py-1">{row.overfitting_risk ? "Flagged" : "—"}</td>
                           <td className="px-2 py-1">{row.success ? "Yes" : "No"}</td>
-                          <td className="px-2 py-1">{String(row.error ?? "-")}</td>
+                          <td className="px-2 py-1 max-w-[140px] truncate" title={String(row.error ?? "")}>
+                            {String(row.error ?? "-")}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

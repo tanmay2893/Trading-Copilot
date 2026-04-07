@@ -167,5 +167,23 @@ def clamp_date_range(
     return start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"), was_clamped
 
 
+def full_history_date_range(interval: str) -> tuple[str, str, bool]:
+    """Widest date window allowed for the interval (yfinance limits + clamp).
+
+    Daily+ uses ~full history from 2000-01-01 through today; intraday uses the
+    maximum lookback from INTERVAL_MAX_DAYS ending today, then ``clamp_date_range``.
+    """
+    max_days = INTERVAL_MAX_DAYS.get(interval, 100_000)
+    today = datetime.now()
+    end_dt = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    if max_days >= 100_000:
+        start_dt = datetime(2000, 1, 1)
+    else:
+        start_dt = end_dt - timedelta(days=max_days)
+    start = start_dt.strftime("%Y-%m-%d")
+    end = end_dt.strftime("%Y-%m-%d")
+    return clamp_date_range(start, end, interval)
+
+
 def is_intraday(interval: str) -> bool:
     return interval in {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}

@@ -566,6 +566,20 @@ export interface ParameterSearchRow {
   profit_factor?: number | null;
   risk_reward?: number | null;
   max_loss_pct?: number | null;
+  train_win_rate_pct?: number | null;
+  train_total_return_pct?: number | null;
+  train_profit_factor?: number | null;
+  train_risk_reward?: number | null;
+  train_max_loss_pct?: number | null;
+  test_win_rate_pct?: number | null;
+  test_total_return_pct?: number | null;
+  train_total_return_pct_period?: number | null;
+  test_total_return_pct_period?: number | null;
+  test_profit_factor?: number | null;
+  test_risk_reward?: number | null;
+  test_max_loss_pct?: number | null;
+  annual_return_gap?: number | null;
+  overfitting_risk?: boolean;
 }
 
 export interface ParameterSearchResponse {
@@ -573,6 +587,18 @@ export interface ParameterSearchResponse {
   version_id?: string | null;
   total_combinations: number;
   rows: ParameterSearchRow[];
+  optimization_note?: string;
+  interval?: string;
+  history_start?: string;
+  history_end?: string;
+  date_range_was_clamped?: boolean;
+  train_end_date?: string;
+  test_start_date?: string;
+  train_bars?: number;
+  test_bars?: number;
+  profit_annualization?: string;
+  train_period_calendar_days?: number;
+  test_period_calendar_days?: number;
 }
 
 export async function runParameterSearch(

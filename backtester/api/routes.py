@@ -1008,20 +1008,11 @@ def _generate_numeric_values(start: float, end: float, step: float) -> list[floa
     return values
 
 
-def _safe_pct_from_pairs(signals_df: pd.DataFrame | None) -> tuple[float | None, float | None]:
-    """Return (win_rate_pct, total_return_pct) from signal trade pairs."""
-    from backtester.agent.tools import _signals_to_trade_pairs
-
-    if signals_df is None or len(signals_df) == 0:
-        return None, None
-    pairs = _signals_to_trade_pairs(signals_df)
-    if not pairs:
-        return None, None
-    wins = sum(1 for p in pairs if float(p.get("pnl", 0.0)) > 0)
-    total = len(pairs)
-    win_rate = (wins / total) * 100.0 if total else None
-    total_return = sum(float(p.get("pnl_pct", 0.0)) for p in pairs)
-    return win_rate, total_return
+def _format_param_value_for_override(v: float) -> str:
+    """Serialize numeric combo values while preserving integers (e.g. 18 vs 18.0)."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
 
 
 def _save_strategy_version_snapshot(
@@ -1202,8 +1193,11 @@ async def get_batch_rerun_status(session_id: str, job_id: str):
 async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
     from itertools import product
     from backtester.agent.tools import (
-        compute_backtest_metrics_numeric,
-        handle_rerun_on_ticker,
+        execute_parameter_search_combo,
+        load_full_history_ohlcv_for_parameter_search,
+        mark_parameter_search_overfitting,
+        parameter_search_split_calendar_days,
+        parameter_search_train_test_from_signals,
     )
 
     session = ChatSession.load(session_id)
@@ -1235,9 +1229,6 @@ async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
             detail=f"Too many combinations ({total_combinations}). Reduce ranges or increase max_combinations.",
         )
 
-    async def noop(*args, **kwargs):
-        return None
-
     original_state = {
         "active_ticker": session.active_ticker,
         "active_data_df": session.active_data_df,
@@ -1247,17 +1238,67 @@ async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
     }
 
     rows: list[dict] = []
+    meta: dict = {}
     try:
+        loaded = await load_full_history_ohlcv_for_parameter_search(
+            session, req.ticker.strip(), req.version_id
+        )
+        if not loaded.get("success"):
+            raise HTTPException(status_code=400, detail=loaded.get("error", "Failed to load data"))
+
+        data_df = loaded["data_df"]
+        code_to_run = loaded["code_to_run"]
+        strategy_nl = loaded["strategy_nl"]
+        corporate_needs = loaded["corporate_needs"]
+        hist_start = loaded["history_start"]
+        hist_end = loaded["history_end"]
+        was_clamped = loaded["was_clamped"]
+        interval = loaded["interval"]
+
+        from backtester.data.interval import INTERVAL_LABELS
+
+        iv_label = INTERVAL_LABELS.get(interval, interval)
+        seg = parameter_search_split_calendar_days(data_df)
+        meta = {
+            "optimization_note": (
+                "Parameter search uses a fresh download of the widest available history for this symbol "
+                f"({iv_label}), not the chart date range. "
+                "Metrics use an 80% train / 20% test split by bar count (first 80% of rows vs last 20%). "
+                "Train/Test profit % columns are estimated annual %: linear scaling of sum-of-trade % P&L over each "
+                "segment’s calendar span (×365.25/days), so different-length train vs test windows are comparable. "
+                "After you pick parameters, Apply runs on your Start/End dates in this dialog."
+            ),
+            "profit_annualization": (
+                "linear: segment_sum_trade_pct × (365.25 / segment_calendar_days); "
+                "segment days = inclusive calendar span from first to last bar in that split."
+            ),
+            "interval": interval,
+            "history_start": hist_start,
+            "history_end": hist_end,
+            "date_range_was_clamped": was_clamped,
+        }
+        if seg:
+            sidx = int(seg["split_idx"])
+            te_raw = data_df["Date"].iloc[sidx - 1]
+            ts_raw = data_df["Date"].iloc[sidx]
+            meta["train_end_date"] = te_raw.strftime("%Y-%m-%d") if hasattr(te_raw, "strftime") else str(te_raw)[:10]
+            meta["test_start_date"] = ts_raw.strftime("%Y-%m-%d") if hasattr(ts_raw, "strftime") else str(ts_raw)[:10]
+            meta["train_bars"] = seg["train_bars"]
+            meta["test_bars"] = seg["test_bars"]
+            meta["train_period_calendar_days"] = seg["train_period_calendar_days"]
+            meta["test_period_calendar_days"] = seg["test_period_calendar_days"]
+
         for combo in product(*value_lists):
-            overrides = {param_names[i]: str(combo[i]) for i in range(len(param_names))}
-            result = await handle_rerun_on_ticker(
-                session=session,
-                on_event=noop,
-                ticker=req.ticker.strip(),
-                start=req.start_date or "",
-                end=req.end_date or "",
-                param_overrides=overrides,
-                version_id=req.version_id,
+            overrides = {
+                param_names[i]: _format_param_value_for_override(combo[i])
+                for i in range(len(param_names))
+            }
+            result = await execute_parameter_search_combo(
+                code_to_run,
+                data_df,
+                strategy_nl,
+                corporate_needs,
+                overrides,
             )
             row: dict = {**overrides}
             if not result.get("success"):
@@ -1269,20 +1310,76 @@ async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
                     "profit_factor": None,
                     "risk_reward": None,
                     "max_loss_pct": None,
+                    "train_win_rate_pct": None,
+                    "train_total_return_pct": None,
+                    "train_profit_factor": None,
+                    "train_risk_reward": None,
+                    "train_max_loss_pct": None,
+                    "test_win_rate_pct": None,
+                    "test_total_return_pct": None,
+                    "test_profit_factor": None,
+                    "test_risk_reward": None,
+                    "test_max_loss_pct": None,
+                    "annual_return_gap": None,
+                    "overfitting_risk": False,
                 })
             else:
-                win_rate, total_return = _safe_pct_from_pairs(session.active_signals_df)
-                numeric = compute_backtest_metrics_numeric(session.active_signals_df)
-                row.update({
-                    "success": True,
-                    "error": None,
-                    "win_rate_pct": _json_safe_float(win_rate),
-                    "total_return_pct": _json_safe_float(total_return),
-                    "profit_factor": _json_safe_float(numeric.get("profit_factor")),
-                    "risk_reward": _json_safe_float(numeric.get("risk_reward")),
-                    "max_loss_pct": _json_safe_float(numeric.get("max_loss_pct")),
-                })
+                sig = result["signals_df"]
+                tt = parameter_search_train_test_from_signals(sig, data_df)
+                if tt.get("error"):
+                    row.update({
+                        "success": False,
+                        "error": tt["error"],
+                        "win_rate_pct": None,
+                        "total_return_pct": None,
+                        "profit_factor": None,
+                        "risk_reward": None,
+                        "max_loss_pct": None,
+                        "train_win_rate_pct": None,
+                        "train_total_return_pct": None,
+                        "train_profit_factor": None,
+                        "train_risk_reward": None,
+                        "train_max_loss_pct": None,
+                        "test_win_rate_pct": None,
+                        "test_total_return_pct": None,
+                        "test_profit_factor": None,
+                        "test_risk_reward": None,
+                        "test_max_loss_pct": None,
+                        "annual_return_gap": None,
+                        "overfitting_risk": False,
+                    })
+                else:
+                    tw = tt.get("train_win_rate_pct")
+                    ttret = tt.get("train_total_return_pct")
+                    tpf = tt.get("train_profit_factor")
+                    trr = tt.get("train_risk_reward")
+                    tml = tt.get("train_max_loss_pct")
+                    row.update({
+                        "success": True,
+                        "error": None,
+                        "win_rate_pct": _json_safe_float(tw),
+                        "total_return_pct": _json_safe_float(ttret),
+                        "profit_factor": _json_safe_float(tpf),
+                        "risk_reward": _json_safe_float(trr),
+                        "max_loss_pct": _json_safe_float(tml),
+                        "train_win_rate_pct": _json_safe_float(tw),
+                        "train_total_return_pct": _json_safe_float(ttret),
+                        "train_total_return_pct_period": _json_safe_float(tt.get("train_total_return_pct_period")),
+                        "train_profit_factor": _json_safe_float(tpf),
+                        "train_risk_reward": _json_safe_float(trr),
+                        "train_max_loss_pct": _json_safe_float(tml),
+                        "test_win_rate_pct": _json_safe_float(tt.get("test_win_rate_pct")),
+                        "test_total_return_pct": _json_safe_float(tt.get("test_total_return_pct")),
+                        "test_total_return_pct_period": _json_safe_float(tt.get("test_total_return_pct_period")),
+                        "test_profit_factor": _json_safe_float(tt.get("test_profit_factor")),
+                        "test_risk_reward": _json_safe_float(tt.get("test_risk_reward")),
+                        "test_max_loss_pct": _json_safe_float(tt.get("test_max_loss_pct")),
+                        "annual_return_gap": _json_safe_float(tt.get("annual_return_gap")),
+                        "overfitting_risk": False,
+                    })
             rows.append(row)
+
+        mark_parameter_search_overfitting(rows)
     finally:
         # Restore previous chart/session state after search; selection apply will set the chosen state.
         session.active_ticker = original_state["active_ticker"]
@@ -1292,12 +1389,14 @@ async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
         session.active_indicator_columns = original_state["active_indicator_columns"]
         session.save()
 
-    return {
+    out = {
         "ticker": req.ticker.strip(),
         "version_id": req.version_id,
         "total_combinations": total_combinations,
         "rows": rows,
+        **meta,
     }
+    return out
 
 
 @router.post("/sessions/{session_id}/parameter-search/apply")

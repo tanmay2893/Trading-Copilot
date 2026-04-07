@@ -1232,6 +1232,269 @@ def compute_backtest_metrics_numeric(signals_df: pd.DataFrame | None) -> dict[st
     return {"profit_factor": profit_factor, "risk_reward": risk_reward, "max_loss_pct": max_loss_pct}
 
 
+def pct_from_pairs_list(pairs: list[dict]) -> tuple[float | None, float | None]:
+    """Win rate % and sum of trade return % from pair dicts (same semantics as _safe_pct_from_pairs)."""
+    if not pairs:
+        return None, None
+    wins = sum(1 for p in pairs if float(p.get("pnl", 0.0)) > 0)
+    total = len(pairs)
+    win_rate = (wins / total) * 100.0 if total else None
+    total_return = sum(float(p.get("pnl_pct", 0.0)) for p in pairs)
+    return win_rate, total_return
+
+
+def annualize_linear_trade_pnl_sum_pct(
+    period_total_pct: float | None,
+    period_calendar_days: int,
+) -> float | None:
+    """Scale sum-of-trade % P&L to an estimated annual % using segment calendar length.
+
+    Uses linear extrapolation: annual ≈ period_total × (365.25 / days). Comparable across
+    different train/test window lengths. ``period_calendar_days`` is at least 1.
+    """
+    if period_total_pct is None:
+        return None
+    d = max(1, int(period_calendar_days))
+    return float(period_total_pct) * (365.25 / float(d))
+
+
+def parameter_search_split_calendar_days(data_df: pd.DataFrame) -> dict[str, Any] | None:
+    """80/20 row split; calendar days from first to last bar in each segment (inclusive)."""
+    n = len(data_df)
+    if n < 10 or "Date" not in data_df.columns:
+        return None
+    split_idx = int(n * 0.8)
+    if split_idx < 1:
+        split_idx = 1
+    if split_idx >= n:
+        split_idx = n - 1
+    d0 = pd.to_datetime(data_df["Date"].iloc[0])
+    d_tr1 = pd.to_datetime(data_df["Date"].iloc[split_idx - 1])
+    d_te0 = pd.to_datetime(data_df["Date"].iloc[split_idx])
+    d_te1 = pd.to_datetime(data_df["Date"].iloc[n - 1])
+    train_days = max(1, (d_tr1 - d0).days + 1)
+    test_days = max(1, (d_te1 - d_te0).days + 1)
+    return {
+        "split_idx": split_idx,
+        "train_period_calendar_days": train_days,
+        "test_period_calendar_days": test_days,
+        "train_bars": split_idx,
+        "test_bars": n - split_idx,
+    }
+
+
+def compute_backtest_metrics_numeric_from_pairs(pairs: list[dict]) -> dict[str, float | None]:
+    """Same as compute_backtest_metrics_numeric but from pre-built trade pair dicts."""
+    if not pairs:
+        return {"profit_factor": 0.0, "risk_reward": None, "max_loss_pct": None}
+    pnls = [t["pnl"] for t in pairs]
+    pnl_pcts = [t["pnl_pct"] for t in pairs]
+    winning = [p for p in pnls if p > 0]
+    losing = [p for p in pnls if p < 0]
+    n_win = len(winning)
+    n_lose = len(losing)
+    gross_profit = sum(winning) if winning else 0.0
+    gross_loss = sum(losing) if losing else 0.0
+    abs_loss = abs(gross_loss)
+    profit_factor = (gross_profit / abs_loss) if abs_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+    avg_win = (sum(winning) / n_win) if n_win else 0.0
+    avg_loss = (sum(losing) / n_lose) if n_lose else 0.0
+    abs_avg_win = abs(avg_win) if n_win else 0.0
+    risk_reward = (abs(avg_loss) / abs_avg_win) if (n_win and n_lose and abs_avg_win > 0) else None
+    max_loss_pct = min(pnl_pcts) if pnl_pcts else None
+    return {"profit_factor": profit_factor, "risk_reward": risk_reward, "max_loss_pct": max_loss_pct}
+
+
+def parameter_search_train_test_from_signals(
+    signals_df: pd.DataFrame | None,
+    data_df: pd.DataFrame,
+) -> dict[str, Any]:
+    """Split completed trades by first bar date of the holdout (80% row index on ``data_df``)."""
+    if signals_df is None or len(signals_df) == 0:
+        return {"error": "No signals"}
+    split_info = parameter_search_split_calendar_days(data_df)
+    if not split_info:
+        return {"error": "Not enough price bars for train/test split (need at least 10)."}
+    split_idx = int(split_info["split_idx"])
+    train_period_days = int(split_info["train_period_calendar_days"])
+    test_period_days = int(split_info["test_period_calendar_days"])
+    split_dt = pd.to_datetime(data_df["Date"].iloc[split_idx])
+    train_end = data_df["Date"].iloc[split_idx - 1]
+    test_start = data_df["Date"].iloc[split_idx]
+    train_end_str = train_end.strftime("%Y-%m-%d") if hasattr(train_end, "strftime") else str(train_end)[:10]
+    test_start_str = test_start.strftime("%Y-%m-%d") if hasattr(test_start, "strftime") else str(test_start)[:10]
+
+    pairs = _signals_to_trade_pairs(signals_df)
+    train_pairs: list[dict] = []
+    test_pairs: list[dict] = []
+    for p in pairs:
+        ed = pd.to_datetime(p["entry_date"])
+        if ed < split_dt:
+            train_pairs.append(p)
+        else:
+            test_pairs.append(p)
+
+    tw, tt_raw = pct_from_pairs_list(train_pairs)
+    tew, tet_raw = pct_from_pairs_list(test_pairs)
+    tt_ann = annualize_linear_trade_pnl_sum_pct(tt_raw, train_period_days)
+    tet_ann = annualize_linear_trade_pnl_sum_pct(tet_raw, test_period_days)
+    num_tr = compute_backtest_metrics_numeric_from_pairs(train_pairs)
+    num_te = compute_backtest_metrics_numeric_from_pairs(test_pairs)
+
+    annual_gap: float | None = None
+    if tt_ann is not None and tet_ann is not None:
+        annual_gap = float(tt_ann) - float(tet_ann)
+
+    return {
+        "train_win_rate_pct": tw,
+        "train_total_return_pct": tt_ann,
+        "train_total_return_pct_period": tt_raw,
+        "train_profit_factor": num_tr.get("profit_factor"),
+        "train_risk_reward": num_tr.get("risk_reward"),
+        "train_max_loss_pct": num_tr.get("max_loss_pct"),
+        "test_win_rate_pct": tew,
+        "test_total_return_pct": tet_ann,
+        "test_total_return_pct_period": tet_raw,
+        "test_profit_factor": num_te.get("profit_factor"),
+        "test_risk_reward": num_te.get("risk_reward"),
+        "test_max_loss_pct": num_te.get("max_loss_pct"),
+        "annual_return_gap": annual_gap,
+        "train_trades": len(train_pairs),
+        "test_trades": len(test_pairs),
+        "train_end_date": train_end_str,
+        "test_start_date": test_start_str,
+        "split_idx": split_idx,
+        "train_bars": split_info["train_bars"],
+        "test_bars": split_info["test_bars"],
+        "train_period_calendar_days": train_period_days,
+        "test_period_calendar_days": test_period_days,
+    }
+
+
+def resolve_strategy_code_for_parameter_search(
+    session: ChatSession,
+    version_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Load strategy code for optimization. Does not mutate session."""
+    if version_id:
+        path = AGENT_SESSIONS_DIR / session.session_id / "strategy_versions" / f"{version_id}.py"
+        if not path.exists():
+            return None, f"Strategy version {version_id} not found."
+        return path.read_text(encoding="utf-8"), None
+    code_to_run = ChatSession.get_latest_strategy_code_from_disk(session.session_id)
+    if not code_to_run or not code_to_run.strip():
+        code_to_run = session.active_code
+    if not code_to_run or not code_to_run.strip():
+        return None, "No active strategy to optimize. Run a backtest first."
+    return code_to_run, None
+
+
+async def load_full_history_ohlcv_for_parameter_search(
+    session: ChatSession,
+    ticker: str,
+    version_id: str | None,
+) -> dict[str, Any]:
+    """Fetch widest allowed OHLCV + corporate merge once. Returns error dict on failure."""
+    from backtester.data.corporate import detect_corporate_needs, download_corporate_data, merge_corporate_data
+    from backtester.data.downloader import download_data
+    from backtester.data.interval import full_history_date_range
+
+    code_to_run, err = resolve_strategy_code_for_parameter_search(session, version_id)
+    if err:
+        return {"success": False, "error": err}
+
+    strategy_nl = session.active_strategy or ""
+    interval = session.active_interval or "1d"
+    start, end, was_clamped = full_history_date_range(interval)
+
+    try:
+        data_df = await _run_sync(download_data, ticker.strip(), start, end, interval=interval)
+    except Exception as exc:
+        return {"success": False, "error": f"Data download failed: {exc}"}
+
+    corporate_needs = detect_corporate_needs(strategy_nl)
+    if corporate_needs:
+        try:
+            corporate = await _run_sync(download_corporate_data, ticker.strip(), corporate_needs, start, end)
+            data_df = merge_corporate_data(data_df, corporate)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("Corporate data merge failed during parameter search")
+            return {"success": False, "error": f"Corporate data merge failed: {exc}"}
+
+    return {
+        "success": True,
+        "data_df": data_df,
+        "code_to_run": code_to_run,
+        "strategy_nl": strategy_nl,
+        "corporate_needs": corporate_needs,
+        "history_start": start,
+        "history_end": end,
+        "was_clamped": was_clamped,
+        "interval": interval,
+    }
+
+
+async def execute_parameter_search_combo(
+    code_to_run: str,
+    data_df: pd.DataFrame,
+    strategy_nl: str,
+    corporate_needs: Any,
+    param_overrides: dict[str, str],
+) -> dict[str, Any]:
+    """Run strategy once on preloaded data; validate. Does not touch ChatSession."""
+    from backtester.engine.executor import execute_strategy
+    from backtester.engine.validator import validate_output
+
+    exec_result = await _run_sync(
+        execute_strategy,
+        code_to_run,
+        data_df,
+        param_overrides=param_overrides,
+    )
+    if not exec_result.success:
+        return {
+            "success": False,
+            "error": f"Execution failed: [{exec_result.error_type}] {exec_result.error_message}",
+        }
+    validation = await _run_sync(
+        validate_output,
+        exec_result.output_df,
+        data_df,
+        strategy_description=strategy_nl or None,
+        corporate_needs=corporate_needs if corporate_needs else None,
+        strategy_code=code_to_run,
+    )
+    if not validation.valid:
+        return {"success": False, "error": f"Validation failed: {'; '.join(validation.issues)}"}
+    return {"success": True, "signals_df": exec_result.output_df}
+
+
+def mark_parameter_search_overfitting(rows: list[dict]) -> None:
+    """Flag the worst 30% of rows by (train − test) estimated annual return % among positive gaps."""
+    worst_frac = 0.30
+    scored: list[tuple[float, dict]] = []
+    for row in rows:
+        if not row.get("success"):
+            row["overfitting_risk"] = False
+            continue
+        gap = row.get("annual_return_gap")
+        if gap is None or not isinstance(gap, (int, float)) or not math.isfinite(gap):
+            row["overfitting_risk"] = False
+            continue
+        if gap <= 0:
+            row["overfitting_risk"] = False
+            continue
+        scored.append((float(gap), row))
+    if not scored:
+        return
+    scored.sort(key=lambda x: -x[0])
+    n = len(scored)
+    worst_n = max(1, int(math.ceil(n * worst_frac)))
+    for i, (_, row) in enumerate(scored):
+        row["overfitting_risk"] = i < worst_n
+
+
 async def handle_get_backtesting_table(
     session: ChatSession,
     on_event: Callback,
