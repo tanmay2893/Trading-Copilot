@@ -16,7 +16,11 @@ That loop—**idea → execution → chart → tweak**—is the whole product.
 
 ---
 
-https://github.com/user-attachments/assets/b2fcf150-7043-461d-ace9-6e852e270d9c
+
+
+https://github.com/user-attachments/assets/595839bd-18a6-43fb-b488-2c52b0981c4e
+
+
 
 ---
 
