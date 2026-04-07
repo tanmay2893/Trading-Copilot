@@ -4,6 +4,7 @@ import React from "react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { parseMathSegments, type MathSegment } from "@/lib/parseMath";
+import { renderInlineMarkdown } from "@/lib/renderInlineMarkdown";
 
 interface TextWithMathProps {
   content: string;
@@ -14,7 +15,7 @@ function renderMathSegment(seg: MathSegment, key: number): React.ReactNode {
   if (seg.type === "text") {
     return (
       <span key={key} className="whitespace-pre-wrap">
-        {seg.content}
+        {renderInlineMarkdown(seg.content, `m${key}`)}
       </span>
     );
   }
@@ -69,7 +70,7 @@ function renderLineWithMath(line: string, lineKey: number): React.ReactNode {
   if (segments.length === 1 && segments[0].type === "text") {
     return (
       <div key={lineKey} className="whitespace-pre-wrap">
-        {segments[0].content}
+        {renderInlineMarkdown(segments[0].content, `ln${lineKey}`)}
       </div>
     );
   }
@@ -80,11 +81,12 @@ function renderLineWithMath(line: string, lineKey: number): React.ReactNode {
   );
 }
 
-/** Renders text with block structure: newlines → blocks, "- " / "* " → list. */
+/** Renders text with block structure: newlines, ### headings, "1. " lists, "- " / "* " lists. */
 function renderTextWithBlocks(text: string, baseKey: number): React.ReactNode[] {
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
   let listItems: string[] = [];
+  let orderedItems: string[] = [];
   let key = baseKey;
 
   const flushList = () => {
@@ -103,21 +105,71 @@ function renderTextWithBlocks(text: string, baseKey: number): React.ReactNode[] 
     }
   };
 
+  const flushOrdered = () => {
+    if (orderedItems.length > 0) {
+      nodes.push(
+        <ol
+          key={key++}
+          className="list-decimal list-inside pl-4 my-1 space-y-0.5 text-[inherit]"
+        >
+          {orderedItems.map((item, j) => (
+            <li key={j}>{parseMathSegments(item).map((seg, i) => renderMathSegment(seg, i))}</li>
+          ))}
+        </ol>
+      );
+      orderedItems = [];
+    }
+  };
+
+  const flushLists = () => {
+    flushList();
+    flushOrdered();
+  };
+
   for (const line of lines) {
+    const headingMatch = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    const orderedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
     const listMatch = line.match(/^\s*[-*]\s+(.*)$/);
+
+    if (headingMatch) {
+      flushLists();
+      const level = headingMatch[1].length;
+      const title = headingMatch[2];
+      const headingClass =
+        level <= 1
+          ? "text-base font-semibold text-[var(--text-primary)] mt-2 first:mt-0"
+          : level === 2
+            ? "text-sm font-semibold text-[var(--text-primary)] mt-2 first:mt-0"
+            : "text-sm font-semibold text-[var(--text-primary)] mt-1.5 first:mt-0";
+      const hk = key++;
+      nodes.push(
+        <div key={hk} className={headingClass}>
+          {renderInlineMarkdown(title, `h${hk}`)}
+        </div>
+      );
+      continue;
+    }
+
+    if (orderedMatch) {
+      flushList();
+      orderedItems.push(orderedMatch[1]);
+      continue;
+    }
+
     if (listMatch) {
-      flushList();
+      flushOrdered();
       listItems.push(listMatch[1]);
+      continue;
+    }
+
+    flushLists();
+    if (line.trim() === "") {
+      nodes.push(<div key={key++} className="h-2" aria-hidden />);
     } else {
-      flushList();
-      if (line.trim() === "") {
-        nodes.push(<div key={key++} className="h-2" aria-hidden />);
-      } else {
-        nodes.push(renderLineWithMath(line, key++));
-      }
+      nodes.push(renderLineWithMath(line, key++));
     }
   }
-  flushList();
+  flushLists();
   return nodes;
 }
 
@@ -127,8 +179,13 @@ export function TextWithMath({ content, className = "" }: TextWithMathProps) {
   if (segments.length === 0) return null;
   if (segments.length === 1 && segments[0].type === "text") {
     const text = segments[0].content;
-    if (!text.includes("\n") && !/^\s*[-*]\s+/m.test(text)) {
-      return <span className={className}>{text}</span>;
+    const needsBlockLayout =
+      text.includes("\n") ||
+      /^\s*[-*]\s+/m.test(text) ||
+      /^\s*#{1,6}\s/m.test(text) ||
+      /^\s*\d+\.\s/m.test(text);
+    if (!needsBlockLayout) {
+      return <span className={className}>{renderInlineMarkdown(text, "twm")}</span>;
     }
     return (
       <div className={`${className} space-y-1`}>
@@ -143,12 +200,18 @@ export function TextWithMath({ content, className = "" }: TextWithMathProps) {
     <div className={`${className} space-y-1`}>
       {segments.map((seg, i) => {
         if (seg.type === "text") {
-          if (seg.content.includes("\n") || /^\s*[-*]\s+/m.test(seg.content)) {
-            return <React.Fragment key={i}>{renderTextWithBlocks(seg.content, i * 1000)}</React.Fragment>;
+          const sc = seg.content;
+          const needsBlockLayout =
+            sc.includes("\n") ||
+            /^\s*[-*]\s+/m.test(sc) ||
+            /^\s*#{1,6}\s/m.test(sc) ||
+            /^\s*\d+\.\s/m.test(sc);
+          if (needsBlockLayout) {
+            return <React.Fragment key={i}>{renderTextWithBlocks(sc, i * 1000)}</React.Fragment>;
           }
           return (
             <span key={i} className="whitespace-pre-wrap block">
-              {seg.content}
+              {renderInlineMarkdown(sc, `seg${i}`)}
             </span>
           );
         }
