@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -966,6 +967,150 @@ class BatchRerunRequest(BaseModel):
     end_date: str = ""
 
 
+class ParameterRangeSpec(BaseModel):
+    start: float
+    end: float
+    step: float
+
+
+class ParameterSearchRequest(BaseModel):
+    ticker: str
+    parameter_ranges: dict[str, ParameterRangeSpec]
+    version_id: str | None = None
+    start_date: str = ""
+    end_date: str = ""
+    max_combinations: int = 200
+
+
+class ParameterSearchApplyRequest(BaseModel):
+    ticker: str
+    selected_parameters: dict[str, str]
+    version_id: str | None = None
+    start_date: str = ""
+    end_date: str = ""
+
+
+def _generate_numeric_values(start: float, end: float, step: float) -> list[float]:
+    if step <= 0:
+        raise ValueError("step must be > 0")
+    lo, hi = (start, end) if start <= end else (end, start)
+    values: list[float] = []
+    cur = lo
+    guard = 0
+    while cur <= hi + (abs(step) * 1e-9):
+        values.append(round(cur, 10))
+        cur += step
+        guard += 1
+        if guard > 5000:
+            break
+    if not values:
+        values = [round(lo, 10)]
+    return values
+
+
+def _safe_pct_from_pairs(signals_df: pd.DataFrame | None) -> tuple[float | None, float | None]:
+    """Return (win_rate_pct, total_return_pct) from signal trade pairs."""
+    from backtester.agent.tools import _signals_to_trade_pairs
+
+    if signals_df is None or len(signals_df) == 0:
+        return None, None
+    pairs = _signals_to_trade_pairs(signals_df)
+    if not pairs:
+        return None, None
+    wins = sum(1 for p in pairs if float(p.get("pnl", 0.0)) > 0)
+    total = len(pairs)
+    win_rate = (wins / total) * 100.0 if total else None
+    total_return = sum(float(p.get("pnl_pct", 0.0)) for p in pairs)
+    return win_rate, total_return
+
+
+def _save_strategy_version_snapshot(
+    session: ChatSession,
+    code: str,
+    *,
+    source: str,
+    change_request: str | None = None,
+    ticker: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    interval: str | None = None,
+) -> str:
+    from datetime import datetime, timezone
+    from backtester.agent.session import AGENT_SESSIONS_DIR
+
+    version_id = uuid.uuid4().hex[:12]
+    base_dir = AGENT_SESSIONS_DIR / session.session_id / "strategy_versions"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    (base_dir / f"{version_id}.py").write_text(code, encoding="utf-8")
+
+    manifest_path = base_dir / "manifest.json"
+    manifest: list[dict] = []
+    if manifest_path.exists():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = loaded if isinstance(loaded, list) else []
+        except (json.JSONDecodeError, TypeError):
+            manifest = []
+    manifest.append({
+        "version_id": version_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "strategy_text": session.active_strategy,
+        "change_request": change_request,
+        "ticker": ticker or session.active_ticker,
+        "start_date": start_date or getattr(session, "start_date", None),
+        "end_date": end_date or getattr(session, "end_date", None),
+        "interval": interval or getattr(session, "active_interval", None),
+    })
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return version_id
+
+
+def _coerce_value_literal(raw: str) -> str:
+    s = str(raw).strip()
+    low = s.lower()
+    if low in ("true", "false"):
+        return "True" if low == "true" else "False"
+    if low in ("none", "null"):
+        return "None"
+    if re.fullmatch(r"-?\d+", s):
+        return s
+    if re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return s
+    # Keep as a quoted string fallback.
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _apply_parameter_defaults_to_code(code: str, selected_parameters: dict[str, str]) -> str:
+    """Bake selected parameters into strategy code defaults (__init__ first, class attrs fallback)."""
+    updated = code
+
+    # 1) Update __init__ signature defaults (most common path used by parameter extractor).
+    m = re.search(r"def\s+__init__\s*\((?P<sig>.*?)\)\s*:", updated, flags=re.DOTALL)
+    if m:
+        sig = m.group("sig")
+        new_sig = sig
+        for name, value in selected_parameters.items():
+            lit = _coerce_value_literal(value)
+            # Replace occurrences like: name = oldvalue
+            pattern = rf"(\b{name}\s*=\s*)([^,\n\)]*)"
+            new_sig = re.sub(pattern, rf"\g<1>{lit}", new_sig)
+        updated = updated[: m.start("sig")] + new_sig + updated[m.end("sig") :]
+
+    # 2) Fallback: update class-level assignments if present.
+    for name, value in selected_parameters.items():
+        lit = _coerce_value_literal(value)
+        updated = re.sub(
+            rf"(^[ \t]*{re.escape(name)}\s*=\s*)(.+)$",
+            rf"\g<1>{lit}",
+            updated,
+            flags=re.MULTILINE,
+        )
+
+    return updated
+
+
 @router.post("/sessions/{session_id}/batch_rerun")
 async def start_batch_rerun(session_id: str, req: BatchRerunRequest):
     """Start a background job to run the current strategy on all stocks for the given country. Returns job_id to poll."""
@@ -1050,6 +1195,158 @@ async def get_batch_rerun_status(session_id: str, job_id: str):
         "results": results,
         "country": job.get("country"),
         "error": job.get("error"),
+    }
+
+
+@router.post("/sessions/{session_id}/parameter-search")
+async def run_parameter_search(session_id: str, req: ParameterSearchRequest):
+    from itertools import product
+    from backtester.agent.tools import (
+        compute_backtest_metrics_numeric,
+        handle_rerun_on_ticker,
+    )
+
+    session = ChatSession.load(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not session.active_code:
+        raise HTTPException(status_code=400, detail="No strategy to optimize. Run a backtest first.")
+    if not req.parameter_ranges:
+        raise HTTPException(status_code=400, detail="parameter_ranges is required")
+    if req.max_combinations <= 0:
+        raise HTTPException(status_code=400, detail="max_combinations must be > 0")
+
+    param_names: list[str] = []
+    value_lists: list[list[float]] = []
+    for name, spec in req.parameter_ranges.items():
+        try:
+            vals = _generate_numeric_values(spec.start, spec.end, spec.step)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid range for {name}: {exc}")
+        param_names.append(name)
+        value_lists.append(vals)
+
+    total_combinations = 1
+    for vals in value_lists:
+        total_combinations *= max(1, len(vals))
+    if total_combinations > req.max_combinations:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many combinations ({total_combinations}). Reduce ranges or increase max_combinations.",
+        )
+
+    async def noop(*args, **kwargs):
+        return None
+
+    original_state = {
+        "active_ticker": session.active_ticker,
+        "active_data_df": session.active_data_df,
+        "active_signals_df": session.active_signals_df,
+        "active_indicator_df": session.active_indicator_df,
+        "active_indicator_columns": session.active_indicator_columns,
+    }
+
+    rows: list[dict] = []
+    try:
+        for combo in product(*value_lists):
+            overrides = {param_names[i]: str(combo[i]) for i in range(len(param_names))}
+            result = await handle_rerun_on_ticker(
+                session=session,
+                on_event=noop,
+                ticker=req.ticker.strip(),
+                start=req.start_date or "",
+                end=req.end_date or "",
+                param_overrides=overrides,
+                version_id=req.version_id,
+            )
+            row: dict = {**overrides}
+            if not result.get("success"):
+                row.update({
+                    "success": False,
+                    "error": result.get("error", "Unknown error"),
+                    "win_rate_pct": None,
+                    "total_return_pct": None,
+                    "profit_factor": None,
+                    "risk_reward": None,
+                    "max_loss_pct": None,
+                })
+            else:
+                win_rate, total_return = _safe_pct_from_pairs(session.active_signals_df)
+                numeric = compute_backtest_metrics_numeric(session.active_signals_df)
+                row.update({
+                    "success": True,
+                    "error": None,
+                    "win_rate_pct": _json_safe_float(win_rate),
+                    "total_return_pct": _json_safe_float(total_return),
+                    "profit_factor": _json_safe_float(numeric.get("profit_factor")),
+                    "risk_reward": _json_safe_float(numeric.get("risk_reward")),
+                    "max_loss_pct": _json_safe_float(numeric.get("max_loss_pct")),
+                })
+            rows.append(row)
+    finally:
+        # Restore previous chart/session state after search; selection apply will set the chosen state.
+        session.active_ticker = original_state["active_ticker"]
+        session.active_data_df = original_state["active_data_df"]
+        session.active_signals_df = original_state["active_signals_df"]
+        session.active_indicator_df = original_state["active_indicator_df"]
+        session.active_indicator_columns = original_state["active_indicator_columns"]
+        session.save()
+
+    return {
+        "ticker": req.ticker.strip(),
+        "version_id": req.version_id,
+        "total_combinations": total_combinations,
+        "rows": rows,
+    }
+
+
+@router.post("/sessions/{session_id}/parameter-search/apply")
+async def apply_parameter_search_selection(session_id: str, req: ParameterSearchApplyRequest):
+    from backtester.agent.tools import handle_rerun_on_ticker
+
+    session = ChatSession.load(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not req.selected_parameters:
+        raise HTTPException(status_code=400, detail="selected_parameters is required")
+
+    async def noop(*args, **kwargs):
+        return None
+
+    rerun_result = await handle_rerun_on_ticker(
+        session=session,
+        on_event=noop,
+        ticker=req.ticker.strip(),
+        start=req.start_date or "",
+        end=req.end_date or "",
+        param_overrides=req.selected_parameters,
+        version_id=req.version_id,
+    )
+    if not rerun_result.get("success"):
+        raise HTTPException(status_code=400, detail=rerun_result.get("error", "Failed to apply parameters"))
+
+    code_for_version = ChatSession.get_latest_strategy_code_from_disk(session.session_id) or session.active_code
+    if not code_for_version or not code_for_version.strip():
+        raise HTTPException(status_code=400, detail="No strategy code available to version")
+    code_for_version = _apply_parameter_defaults_to_code(code_for_version, req.selected_parameters)
+    session.active_code = code_for_version
+
+    version_id = _save_strategy_version_snapshot(
+        session,
+        code_for_version,
+        source="optimize_parameters",
+        change_request=f"Best-parameter selection on {req.ticker.strip()}: {json.dumps(req.selected_parameters)}",
+        ticker=req.ticker.strip(),
+        start_date=req.start_date or None,
+        end_date=req.end_date or None,
+        interval=session.active_interval,
+    )
+    session.save()
+    return {
+        "success": True,
+        "strategy_version_id": version_id,
+        "ticker": req.ticker.strip(),
+        "selected_parameters": req.selected_parameters,
     }
 
 

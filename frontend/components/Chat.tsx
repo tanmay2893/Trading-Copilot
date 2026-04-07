@@ -218,7 +218,7 @@ export function Chat({ sessionId, onOpenChart, getChartScreenshot, onChartDataUp
   }, [sessionId, versionIdsInMessages.join(",")]);
 
   // Require naming only when a strategy was created or refined. Manifest uses run_backtest | refine | fix; API/docs also use refine_strategy / fix_strategy. Never when rerun.
-  const REQUIRED_TAG_SOURCES = ["run_backtest", "refine", "fix", "refine_strategy", "fix_strategy"];
+  const REQUIRED_TAG_SOURCES = ["run_backtest", "refine", "fix", "refine_strategy", "fix_strategy", "optimize_parameters"];
   const hasUntaggedVersion =
     versionIdsInLastMessage.length > 0 &&
     versionIdsInLastMessage.some(
